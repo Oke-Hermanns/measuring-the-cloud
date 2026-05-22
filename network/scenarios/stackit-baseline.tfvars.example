@@ -1,0 +1,19 @@
+# Copy to stackit-baseline.tfvars and adjust for your STACKIT project.
+
+stackit_project_id = "your-project-id"
+stackit_region = "eu01"
+subnet_cidr = "10.64.0.0/24"
+client_availability_zone = "eu01-1"
+server_availability_zone = "eu01-1"
+client_machine_type = "g2a.2d"
+server_machine_type = "g2a.2d"
+image_id = "your-image-id"
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+ssh_private_key_path = "~/.ssh/id_ed25519"
+existing_key_pair_name = ""
+root_volume_size_gib = 30
+root_volume_performance_class = ""
+ssh_ingress_cidr = "0.0.0.0/0"
+ipv4_nameservers = ["1.1.1.1", "8.8.8.8"]
+assign_public_ip = true
+instance_affinity = "none"
