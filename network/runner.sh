@@ -67,9 +67,24 @@ run_scenario() {
   scenario_file="$(abs_path "$scenario_file")"
   require_file "$scenario_file"
 
-  unset SCENARIO_NAME PROVIDER TOFU_DIR TFVARS_FILE BENCHMARK_DIR PLACEMENT_MODE OS_TUNING INSTANCE_AFFINITY CLIENT_MACHINE_TYPE SERVER_MACHINE_TYPE CLIENT_AVAILABILITY_ZONE SERVER_AVAILABILITY_ZONE
+  unset SCENARIO_NAME PROVIDER TOFU_DIR TFVARS_FILE BENCHMARK_DIR PLACEMENT_MODE OS_TUNING INSTANCE_AFFINITY CLIENT_MACHINE_TYPE SERVER_MACHINE_TYPE CLIENT_AVAILABILITY_ZONE SERVER_AVAILABILITY_ZONE SKIP SKIP_REASON
   # shellcheck disable=SC1090
   source "$scenario_file"
+
+  local skip="${SKIP:-0}"
+  local skip_reason="${SKIP_REASON:-}"
+  local scenario_label="${SCENARIO_NAME:-$(basename "$scenario_file")}"
+  if [[ "$skip" == "1" ]]; then
+    log "scenario ${scenario_label} skipped"
+    if [[ -n "$skip_reason" ]]; then
+      echo "  skip_reason=${skip_reason}"
+    fi
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "  status=skipped"
+      [[ -n "$skip_reason" ]] && echo "  skip_reason=${skip_reason}"
+    fi
+    return 0
+  fi
 
   [[ -n "${SCENARIO_NAME:-}" ]] || die "${scenario_file}: SCENARIO_NAME is required"
   [[ "$SCENARIO_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || die "${scenario_file}: SCENARIO_NAME contains unsafe characters"
@@ -106,6 +121,7 @@ run_scenario() {
 
   log "scenario ${SCENARIO_NAME}"
   if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "  status=planned"
     echo "  provider=${PROVIDER}"
     echo "  tofu_dir=${TOFU_DIR}"
     echo "  tfvars_file=${TFVARS_FILE}"

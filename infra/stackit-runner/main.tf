@@ -115,7 +115,7 @@ resource "stackit_server" "runner" {
   network_interfaces = [
     stackit_network_interface.runner.network_interface_id
   ]
-  user_data = templatefile("${path.module}/../stackit/templates/user_data.sh.tftpl", {
+  user_data = templatefile("${path.module}/templates/user_data.sh.tftpl", {
     node_role = "runner"
   })
   labels = merge(local.labels, {

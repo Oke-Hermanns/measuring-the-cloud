@@ -2,10 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 source "${REPO_ROOT}/common/scripts/common.sh"
 
 RUNNER_WORKDIR="${RUNNER_WORKDIR:-/opt/cloud-measuring}"
+WORKLOAD=""
 RUN_ID=""
 DESTROY_MODE="always"
 ACCESS_MODE="private"
@@ -13,12 +14,13 @@ declare -a RUNNER_ARGS=()
 
 usage() {
   cat >&2 <<USAGE
-usage: $0 --run-id ID [--destroy always|success|never] [--access-mode public|private] -- [runner args...]
+usage: $0 --workload WORKLOAD --run-id ID [--destroy always|success|never] [--access-mode public|private] -- [runner args...]
 USAGE
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --workload) WORKLOAD="$2"; shift 2 ;;
     --run-id) RUN_ID="$2"; shift 2 ;;
     --destroy) DESTROY_MODE="$2"; shift 2 ;;
     --access-mode) ACCESS_MODE="$2"; shift 2 ;;
@@ -28,6 +30,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+[[ -n "$WORKLOAD" ]] || { usage; exit 1; }
 [[ -n "$RUN_ID" ]] || { usage; exit 1; }
 case "$DESTROY_MODE" in
   always|success|never) ;;
@@ -38,7 +41,7 @@ case "$ACCESS_MODE" in
   *) die "--access-mode must be one of: public, private" ;;
 esac
 
-ARTIFACT_DIR="${RUNNER_WORKDIR}/artifacts/network/${RUN_ID}"
+ARTIFACT_DIR="${RUNNER_WORKDIR}/artifacts/${WORKLOAD}/${RUN_ID}"
 STATE_DIR="${RUNNER_WORKDIR}/state"
 PID_FILE="${STATE_DIR}/runner-${RUN_ID}.pid"
 LAUNCHER_LOG="${ARTIFACT_DIR}/launcher.log"
@@ -49,7 +52,7 @@ runner_cmd=(
   env
   PATH="/usr/local/bin:/usr/bin:/bin"
   STACKIT_SERVICE_ACCOUNT_KEY_PATH="${STATE_DIR}/stackit-service-account.json"
-  ./network/runner.sh
+  "./${WORKLOAD}/runner.sh"
   --access-mode "$ACCESS_MODE"
   --run-id "$RUN_ID"
   --destroy "$DESTROY_MODE"
@@ -62,5 +65,5 @@ runner_cmd=(
   printf '%s\n' "$!" >"$PID_FILE"
 )
 
-printf 'launched run-id=%s pid=%s launcher-log=%s\n' "$RUN_ID" "$(cat "$PID_FILE")" "$LAUNCHER_LOG"
+printf 'launched workload=%s run-id=%s pid=%s launcher-log=%s\n' "$WORKLOAD" "$RUN_ID" "$(cat "$PID_FILE")" "$LAUNCHER_LOG"
 printf '%s\n' "$PID_FILE"

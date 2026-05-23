@@ -5,7 +5,7 @@ scenario, runs benchmark files on that pair, fetches results, and then destroys
 the infrastructure according to the selected destroy policy.
 
 For unattended execution, there is a separate persistent STACKIT foundation
-stack in `network/infra/stackit-runner/` which provisions a small runner VM,
+stack in `infra/stackit-runner/` which provisions a small runner VM,
 shared network, and shared security group. The benchmark runner can be staged
 onto that VM and then executed over private IPs only.
 
@@ -36,16 +36,16 @@ Useful options:
 
 ## Dedicated Runner
 
-Copy and edit the foundation tfvars file:
+Copy and edit the shared runner foundation tfvars file:
 
 ```bash
-cp network/infra/stackit-runner/basic-infra.tfvars.example network/infra/stackit-runner/basic-infra.tfvars
+cp infra/stackit-runner/basic-infra.tfvars.example infra/stackit-runner/basic-infra.tfvars
 ```
 
 Then provision the runner and launch the benchmark suite on it:
 
 ```bash
-./network/scripts/provision_runner.sh \
+./scripts/provision_runner.sh \
   --service-account-json /path/to/stackit-service-account.json \
   --scenario-dir network/scenarios/matrix
 ```
@@ -63,7 +63,7 @@ read back from `tofu output`.
 After the run, fetch the full result tree back to the workstation:
 
 ```bash
-./network/scripts/fetch_runner_results.sh \
+./scripts/fetch_runner_results.sh --workload network \
   --runner-host <runner-public-ip> \
   --ssh-key ~/.ssh/id_ed25519 \
   --run-id run-YYYYMMDD-HHMMSS
@@ -72,7 +72,7 @@ After the run, fetch the full result tree back to the workstation:
 To tear down the persistent foundation stack:
 
 ```bash
-./network/scripts/destroy_runner.sh
+./scripts/destroy_runner.sh
 ```
 
 ## Scenario Files
@@ -88,6 +88,7 @@ BENCHMARK_DIR=network/benchmarks
 PLACEMENT_MODE=single-az
 OS_TUNING=standard
 INSTANCE_AFFINITY=different-host
+SKIP=0
 ```
 
 The concrete cloud setup lives in the referenced tfvars file. For STACKIT,
@@ -150,6 +151,8 @@ SERVER_READY_TIMEOUT_SEC=30
 ```
 
 Set `SKIP=1` to keep a file without executing it.
+For scenario files, `SKIP=1` skips the whole scenario during discovery and
+dry-run reporting.
 
 Benchmark commands are automatically wrapped with `taskset`. The runner uses
 all available CPUs except CPU 0 on each host, or CPU 0 if the host exposes only

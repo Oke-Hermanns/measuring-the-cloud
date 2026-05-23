@@ -17,16 +17,16 @@ persistent benchmark runner VM for private-IP execution:
 
 ## Network Quick Start
 
-Copy and edit the STACKIT foundation tfvars:
+Copy and edit the shared STACKIT runner foundation tfvars:
 
 ```bash
-cp network/infra/stackit-runner/basic-infra.tfvars.example network/infra/stackit-runner/basic-infra.tfvars
+cp infra/stackit-runner/basic-infra.tfvars.example infra/stackit-runner/basic-infra.tfvars
 ```
 
 Then provision the runner and start a benchmark run:
 
 ```bash
-./network/scripts/provision_runner.sh \
+./scripts/provision_runner.sh \
   --service-account-json /path/to/stackit-service-account.json \
   --scenario network/scenarios/stackit-baseline.sh
 ```
@@ -35,7 +35,7 @@ The helper prints a fetch command for the completed run. Use it to pull the
 results back to your workstation once the run has finished:
 
 ```bash
-./network/scripts/fetch_runner_results.sh \
+./scripts/fetch_runner_results.sh --workload network \
   --runner-host <runner-public-ip> \
   --ssh-key ~/.ssh/id_ed25519 \
   --run-id run-YYYYMMDD-HHMMSS
