@@ -2,8 +2,9 @@
 
 Lean benchmark framework for comparing cloud network and storage performance.
 
-The current implemented slice is the STACKIT network benchmark path, with a
-persistent benchmark runner VM for private-IP execution:
+The current implemented slices are the STACKIT network benchmark path and the
+first STACKIT storage benchmark slice, both using a persistent benchmark
+runner VM for private-IP execution:
 
 - provision a small runner VM plus shared network/security plumbing with
   OpenTofu
@@ -14,6 +15,10 @@ persistent benchmark runner VM for private-IP execution:
 - run all non-skipped network benchmark files on the scenario pair
 - fetch raw artifacts back from the runner
 - destroy infrastructure to control cost
+
+The storage slice follows the same runner model but uses one benchmark VM per
+scenario, with `fio` workloads over discovered local and/or attached block
+storage targets.
 
 ## Network Quick Start
 
@@ -40,6 +45,9 @@ results back to your workstation once the run has finished:
   --ssh-key ~/.ssh/id_ed25519 \
   --run-id run-YYYYMMDD-HHMMSS
 ```
+
+If you omit `--run-id`, the helper fetches the latest completed run for the
+selected workload. `--workload storage` works the same way.
 
 The direct local runner is still available for ad-hoc execution:
 

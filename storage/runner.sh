@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+source "${REPO_ROOT}/common/scripts/common.sh"
+
+declare -a SCENARIO_FILES=()
+declare -a BENCHMARK_NAMES=()
+SCENARIO_DIR=""
+LOCAL_OUT="artifacts/storage"
+DESTROY_MODE="always"
+CONTINUE_ON_ERROR=0
+DRY_RUN=0
+ACCESS_MODE="public"
+RUN_ID="run-$(date +%Y%m%d-%H%M%S)"
+LOCAL_RUN_DIR=""
+LOCAL_LAUNCHER_LOG=""
+LOCAL_COMMAND_LOG=""
+
+usage() {
+  cat >&2 <<USAGE
+usage: $0 [--scenario FILE ... | --scenario-dir DIR] [--benchmark NAME ...] [--out DIR] [--destroy always|success|never] [--continue-on-error] [--dry-run] [--access-mode public|private]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --scenario) SCENARIO_FILES+=("$2"); shift 2 ;;
+    --scenario-dir) SCENARIO_DIR="$2"; shift 2 ;;
+    --benchmark) BENCHMARK_NAMES+=("$2"); shift 2 ;;
+    --out) LOCAL_OUT="$2"; shift 2 ;;
+    --destroy) DESTROY_MODE="$2"; shift 2 ;;
+    --continue-on-error) CONTINUE_ON_ERROR=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --access-mode) ACCESS_MODE="$2"; shift 2 ;;
+    --run-id) RUN_ID="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+case "$DESTROY_MODE" in
+  always|success|never) ;;
+  *) die "--destroy must be one of: always, success, never" ;;
+esac
+case "$ACCESS_MODE" in
+  public|private) ;;
+  *) die "--access-mode must be one of: public, private" ;;
+esac
+
+cd "$REPO_ROOT"
+
+if [[ -n "$SCENARIO_DIR" ]]; then
+  SCENARIO_DIR="$(abs_path "$SCENARIO_DIR")"
+  require_dir "$SCENARIO_DIR"
+  mapfile -t dir_scenarios < <(find "$SCENARIO_DIR" -type f -name '*.sh' | sort)
+  SCENARIO_FILES+=("${dir_scenarios[@]}")
+fi
+
+if [[ "${#SCENARIO_FILES[@]}" -eq 0 ]]; then
+  SCENARIO_FILES+=("storage/scenarios/stackit-g2a30d-block.sh")
+fi
+
+run_scenario() {
+  local scenario_file="$1"
+  scenario_file="$(abs_path "$scenario_file")"
+  require_file "$scenario_file"
+
+  unset SCENARIO_NAME PROVIDER TOFU_DIR TFVARS_FILE BENCHMARK_DIR OS_TUNING BENCHMARK_MACHINE_TYPE BENCHMARK_IMAGE_ID BLOCK_VOLUME_SIZE_GIB BLOCK_VOLUME_PERFORMANCE_CLASS BENCHMARK_ROOT_VOLUME_SIZE_GIB BENCHMARK_ROOT_VOLUME_PERFORMANCE_CLASS SKIP SKIP_REASON
+  # shellcheck disable=SC1090
+  source "$scenario_file"
+
+  local skip="${SKIP:-0}"
+  local skip_reason="${SKIP_REASON:-}"
+  local scenario_label="${SCENARIO_NAME:-$(basename "$scenario_file")}"
+  if [[ "$skip" == "1" ]]; then
+    log "scenario ${scenario_label} skipped"
+    if [[ -n "$skip_reason" ]]; then
+      echo "  skip_reason=${skip_reason}"
+    fi
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "  status=skipped"
+      [[ -n "$skip_reason" ]] && echo "  skip_reason=${skip_reason}"
+    fi
+    return 0
+  fi
+
+  [[ -n "${SCENARIO_NAME:-}" ]] || die "${scenario_file}: SCENARIO_NAME is required"
+  [[ "$SCENARIO_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || die "${scenario_file}: SCENARIO_NAME contains unsafe characters"
+  [[ "${PROVIDER:-}" == "stackit" ]] || die "${scenario_file}: only PROVIDER=stackit is currently implemented"
+  [[ -n "${TOFU_DIR:-}" ]] || die "${scenario_file}: TOFU_DIR is required"
+  [[ -n "${TFVARS_FILE:-}" ]] || die "${scenario_file}: TFVARS_FILE is required"
+  BENCHMARK_DIR="${BENCHMARK_DIR:-storage/benchmarks/full}"
+  OS_TUNING="${OS_TUNING:-standard}"
+  [[ "$OS_TUNING" == "standard" || "$OS_TUNING" == "tuned" ]] || die "${scenario_file}: OS_TUNING must be one of: standard, tuned"
+  [[ -n "${BENCHMARK_MACHINE_TYPE:-}" ]] || die "${scenario_file}: BENCHMARK_MACHINE_TYPE is required"
+  [[ -n "${BENCHMARK_IMAGE_ID:-}" ]] || die "${scenario_file}: BENCHMARK_IMAGE_ID is required"
+  BLOCK_VOLUME_SIZE_GIB="${BLOCK_VOLUME_SIZE_GIB:-0}"
+  BLOCK_VOLUME_PERFORMANCE_CLASS="${BLOCK_VOLUME_PERFORMANCE_CLASS:-}"
+  BENCHMARK_ROOT_VOLUME_SIZE_GIB="${BENCHMARK_ROOT_VOLUME_SIZE_GIB:-30}"
+  BENCHMARK_ROOT_VOLUME_PERFORMANCE_CLASS="${BENCHMARK_ROOT_VOLUME_PERFORMANCE_CLASS:-}"
+
+  TOFU_DIR="$(abs_path "$TOFU_DIR")"
+  TFVARS_FILE="$(abs_path "$TFVARS_FILE")"
+  BENCHMARK_DIR="$(abs_path "$BENCHMARK_DIR")"
+  require_dir "$TOFU_DIR"
+  require_dir "$BENCHMARK_DIR"
+  if [[ "$DRY_RUN" -ne 1 ]]; then
+    require_file "$TFVARS_FILE"
+  fi
+
+  log "scenario ${SCENARIO_NAME}"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "  status=planned"
+    echo "  provider=${PROVIDER}"
+    echo "  tofu_dir=${TOFU_DIR}"
+    echo "  tfvars_file=${TFVARS_FILE}"
+    if [[ -f "$TFVARS_FILE" ]]; then
+      echo "  tfvars_exists=1"
+    else
+      echo "  tfvars_exists=0"
+    fi
+    echo "  benchmark_dir=${BENCHMARK_DIR}"
+    echo "  os_tuning=${OS_TUNING}"
+    echo "  benchmark_machine_type=${BENCHMARK_MACHINE_TYPE}"
+    echo "  benchmark_image_id=${BENCHMARK_IMAGE_ID}"
+    echo "  block_volume_size_gib=${BLOCK_VOLUME_SIZE_GIB}"
+    [[ -n "$BLOCK_VOLUME_PERFORMANCE_CLASS" ]] && echo "  block_volume_performance_class=${BLOCK_VOLUME_PERFORMANCE_CLASS}"
+    echo "  access_mode=${ACCESS_MODE}"
+    echo "  destroy=${DESTROY_MODE}"
+    if [[ "${#BENCHMARK_NAMES[@]}" -gt 0 ]]; then
+      echo "  benchmarks=${BENCHMARK_NAMES[*]}"
+    else
+      echo "  benchmarks=all non-skipped files"
+    fi
+    return 0
+  fi
+
+  local setup_rc=0
+  local bench_rc=0
+  local fetch_rc=0
+  local destroy_rc=0
+  local benchmark_args=()
+  local merged_tfvars=""
+  local name
+  for name in "${BENCHMARK_NAMES[@]}"; do
+    benchmark_args+=(--benchmark "$name")
+  done
+
+  merged_tfvars="$(mktemp /tmp/cloud-measuring-storage-tfvars.XXXXXX.tfvars)"
+  cp "$TFVARS_FILE" "$merged_tfvars"
+  apply_tfvar_overlay "$merged_tfvars" "benchmark_machine_type" "\"${BENCHMARK_MACHINE_TYPE}\""
+  apply_tfvar_overlay "$merged_tfvars" "benchmark_image_id" "\"${BENCHMARK_IMAGE_ID}\""
+  apply_tfvar_overlay "$merged_tfvars" "benchmark_block_volume_size_gib" "${BLOCK_VOLUME_SIZE_GIB}"
+  apply_tfvar_overlay "$merged_tfvars" "benchmark_block_volume_performance_class" "\"${BLOCK_VOLUME_PERFORMANCE_CLASS}\""
+  apply_tfvar_overlay "$merged_tfvars" "benchmark_root_volume_size_gib" "${BENCHMARK_ROOT_VOLUME_SIZE_GIB}"
+  apply_tfvar_overlay "$merged_tfvars" "benchmark_root_volume_performance_class" "\"${BENCHMARK_ROOT_VOLUME_PERFORMANCE_CLASS}\""
+  if [[ "$ACCESS_MODE" == "private" ]]; then
+    apply_tfvar_overlay "$merged_tfvars" "assign_public_ip" "false"
+  fi
+  trap 'rm -f "${merged_tfvars:-}"' RETURN
+
+  "${SCRIPT_DIR}/scripts/setup_infra.sh" --tofu-dir "$TOFU_DIR" --tfvars-file "$merged_tfvars" || setup_rc=$?
+
+  if [[ "$setup_rc" -eq 0 ]]; then
+    "${SCRIPT_DIR}/scripts/run_benchmarks.sh" \
+      --tofu-dir "$TOFU_DIR" \
+      --scenario-name "$SCENARIO_NAME" \
+      --benchmark-dir "$BENCHMARK_DIR" \
+      --os-tuning "$OS_TUNING" \
+      --access-mode "$ACCESS_MODE" \
+      --local-log-dir "$LOCAL_RUN_DIR" \
+      --run-id "$RUN_ID" \
+      "${benchmark_args[@]}" || bench_rc=$?
+
+    "${SCRIPT_DIR}/scripts/fetch_results.sh" \
+      --tofu-dir "$TOFU_DIR" \
+      --scenario-name "$SCENARIO_NAME" \
+      --run-id "$RUN_ID" \
+      --access-mode "$ACCESS_MODE" \
+      --out "$LOCAL_OUT" || fetch_rc=$?
+  fi
+
+  if [[ "$DESTROY_MODE" == "always" || ( "$DESTROY_MODE" == "success" && "$setup_rc" -eq 0 && "$bench_rc" -eq 0 && "$fetch_rc" -eq 0 ) ]]; then
+    "${SCRIPT_DIR}/scripts/destroy_infra.sh" --tofu-dir "$TOFU_DIR" --tfvars-file "$merged_tfvars" || destroy_rc=$?
+  fi
+
+  if [[ "$setup_rc" -ne 0 || "$bench_rc" -ne 0 || "$fetch_rc" -ne 0 || "$destroy_rc" -ne 0 ]]; then
+    log "scenario ${SCENARIO_NAME} failed: setup=${setup_rc} benchmark=${bench_rc} fetch=${fetch_rc} destroy=${destroy_rc}"
+    return 1
+  fi
+
+  log "scenario ${SCENARIO_NAME} completed"
+}
+
+apply_tfvar_overlay() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+  tmp="$(mktemp /tmp/cloud-measuring-tfvars-overlay.XXXXXX.tfvars)"
+
+  awk -v key="$key" -v value="$value" '
+    BEGIN { replaced = 0 }
+    /^[[:space:]]*#/ { print; next }
+    /^[[:space:]]*$/ { print; next }
+    {
+      line = $0
+      trimmed = line
+      sub(/^[[:space:]]+/, "", trimmed)
+      candidate = trimmed
+      sub(/[[:space:]]*=.*/, "", candidate)
+      if (candidate == key) {
+        if (!replaced) {
+          printf "%s = %s\n", key, value
+          replaced = 1
+        }
+        next
+      }
+      print
+    }
+    END {
+      if (!replaced) {
+        printf "%s = %s\n", key, value
+      }
+    }
+  ' "$file" >"$tmp"
+
+  mv "$tmp" "$file"
+}
+
+LOCAL_RUN_DIR="$(abs_path "${LOCAL_OUT}/${RUN_ID}")"
+mkdir -p "$LOCAL_RUN_DIR"
+LOCAL_LAUNCHER_LOG="${LOCAL_RUN_DIR}/launcher.log"
+LOCAL_COMMAND_LOG="${LOCAL_RUN_DIR}/commands.log"
+: >"$LOCAL_LAUNCHER_LOG"
+: >"$LOCAL_COMMAND_LOG"
+exec > >(tee -a "$LOCAL_LAUNCHER_LOG") 2>&1
+log "launcher log: ${LOCAL_LAUNCHER_LOG}"
+log "command log: ${LOCAL_COMMAND_LOG}"
+
+overall_rc=0
+for scenario in "${SCENARIO_FILES[@]}"; do
+  if ! run_scenario "$scenario"; then
+    overall_rc=1
+    if [[ "$CONTINUE_ON_ERROR" -ne 1 ]]; then
+      break
+    fi
+  fi
+done
+
+if [[ "$overall_rc" -ne 0 ]]; then
+  exit 1
+fi

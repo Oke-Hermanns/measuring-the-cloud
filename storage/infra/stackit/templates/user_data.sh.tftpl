@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() {
+  echo "[cloud-measuring][$(date --iso-8601=seconds)] $*" | tee -a /var/log/cloud-measuring-user-data.log
+}
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y fio jq rsync sysstat iproute2 ethtool util-linux xfsprogs
+
+mkdir -p /opt/cloud-measuring/{state,bin,results}
+chown -R ubuntu:ubuntu /opt/cloud-measuring
+
+cat >/opt/cloud-measuring/node.env <<EOF
+NODE_ROLE=storage
+EOF
+chown ubuntu:ubuntu /opt/cloud-measuring/node.env
+
+cat >/opt/cloud-measuring/bin/apply-os-tuning.sh <<'TUNING'
+#!/usr/bin/env bash
+set -euo pipefail
+
+profile="$${1:-standard}"
+
+log() {
+  echo "[os-tuning][$(date --iso-8601=seconds)] $*"
+}
+
+apply_sysctl() {
+  local key="$1"
+  local value="$2"
+  local before=""
+  before="$(sysctl -n "$key" 2>/dev/null || true)"
+  log "sysctl $${key}: '$${before}' -> '$${value}'"
+  sysctl -w "$${key}=$${value}"
+}
+
+apply_best_effort() {
+  log "best-effort: $*"
+  "$@" || log "best-effort command failed: $*"
+}
+
+log "profile=$${profile}"
+log "kernel=$(uname -r)"
+
+case "$profile" in
+  standard)
+    log "standard profile selected; no storage tuning applied"
+    ;;
+  tuned)
+    apply_sysctl vm.dirty_background_ratio 5
+    apply_sysctl vm.dirty_ratio 20
+    apply_sysctl vm.swappiness 1
+    apply_sysctl vm.vfs_cache_pressure 50
+    apply_sysctl vm.dirty_expire_centisecs 3000
+    apply_sysctl vm.dirty_writeback_centisecs 500
+    ;;
+  *)
+    echo "unknown OS tuning profile: $${profile}" >&2
+    exit 1
+    ;;
+esac
+TUNING
+chmod +x /opt/cloud-measuring/bin/apply-os-tuning.sh
+
+root_disk() {
+  local root_source root_pkname root_name
+  root_source="$(findmnt -n -o SOURCE / || true)"
+  [[ -n "$${root_source}" ]] || return 0
+
+  root_pkname="$(lsblk -no PKNAME "$${root_source}" 2>/dev/null | head -n1 || true)"
+  if [[ -n "$${root_pkname}" ]]; then
+    printf '/dev/%s\n' "$${root_pkname}"
+    return 0
+  fi
+
+  root_name="$(lsblk -no NAME "$${root_source}" 2>/dev/null | head -n1 || true)"
+  if [[ -n "$${root_name}" ]]; then
+    printf '/dev/%s\n' "$${root_name}"
+  fi
+}
+
+disk_size_gib() {
+  local device="$1"
+  local sectors size_bytes
+  sectors="$(blockdev --getsz "$${device}" 2>/dev/null || true)"
+  if [[ "$${sectors}" =~ ^[0-9]+$ ]]; then
+    size_bytes=$((sectors * 512))
+    echo $(((size_bytes + 1024 * 1024 * 1024 - 1) / (1024 * 1024 * 1024)))
+    return 0
+  fi
+  echo 0
+}
+
+disk_mountpoints() {
+  local device="$1"
+  lsblk -nr -o MOUNTPOINT "$${device}" 2>/dev/null | sed '/^$/d' || true
+}
+
+disk_udev_property() {
+  local device="$1"
+  local key="$2"
+  udevadm info --query=property --name="$${device}" 2>/dev/null | grep -m1 "^$${key}=" | cut -d= -f2- || true
+}
+
+disk_is_local_candidate() {
+  local device="$1"
+  local label
+  label="$(disk_udev_property "$${device}" ID_FS_LABEL)"
+  [[ "$${label}" == "ephemeral0" ]]
+}
+
+disk_is_block_candidate() {
+  local device="$1"
+  local serial label
+  serial="$(disk_udev_property "$${device}" ID_SERIAL)"
+  label="$(disk_udev_property "$${device}" ID_FS_LABEL)"
+
+  [[ -n "$${serial}" ]] && [[ "$${label}" != "ephemeral0" ]]
+}
+
+unmount_disk_mountpoints() {
+  local device="$1"
+  local mountpoint
+  disk_mountpoints "$${device}" | sort -r | while read -r mountpoint; do
+    [[ -n "$${mountpoint}" ]] || continue
+    log "unmounting existing mount $${mountpoint} from $${device}"
+    umount "$${mountpoint}"
+  done
+}
+
+list_non_root_whole_disks() {
+  local root resolved_root name dev
+  root="$(root_disk)"
+  resolved_root="$(readlink -f "$${root}" 2>/dev/null || true)"
+
+  for sysdev in /sys/block/*; do
+    name="$${sysdev##*/}"
+    case "$${name}" in
+      loop*|ram*|zram*|sr*|fd*|dm-*|md*) continue ;;
+    esac
+
+    dev="/dev/$${name}"
+    [[ -b "$${dev}" ]] || continue
+    if [[ -n "$${resolved_root}" && "$(readlink -f "$${dev}")" == "$${resolved_root}" ]]; then
+      continue
+    fi
+    printf '%s\n' "$${dev}"
+  done | sort
+}
+
+wait_for_disks_matching_size() {
+  local expected_size_gib="$1"
+  local min_count="$2"
+  local attempts="$${3:-60}"
+  local delay_s="$${4:-2}"
+  local dev
+  local -a matching=()
+
+  for _ in $(seq 1 "$${attempts}"); do
+    matching=()
+    while read -r dev; do
+      [[ -n "$${dev}" ]] || continue
+      if [[ "$(disk_size_gib "$${dev}")" == "$${expected_size_gib}" ]]; then
+        matching+=("$${dev}")
+      fi
+    done < <(list_non_root_whole_disks)
+
+    if (( $${#matching[@]} >= min_count )); then
+      printf '%s\n' "$${matching[@]}"
+      return 0
+    fi
+    sleep "$${delay_s}"
+  done
+
+  while read -r dev; do
+    [[ -n "$${dev}" ]] || continue
+    if [[ "$(disk_size_gib "$${dev}")" == "$${expected_size_gib}" ]]; then
+      printf '%s\n' "$${dev}"
+    fi
+  done < <(list_non_root_whole_disks)
+}
+
+wait_for_local_disk() {
+  local expected_size_gib="$1"
+  local attempts="$${2:-60}"
+  local delay_s="$${3:-2}"
+  local dev
+  local -a matching=()
+
+  for _ in $(seq 1 "$${attempts}"); do
+    matching=()
+    while read -r dev; do
+      [[ -n "$${dev}" ]] || continue
+      if disk_is_local_candidate "$${dev}"; then
+        if [[ "$${expected_size_gib}" =~ ^[0-9]+$ ]] && (( expected_size_gib > 0 )); then
+          if [[ "$(disk_size_gib "$${dev}")" == "$${expected_size_gib}" ]]; then
+            matching+=("$${dev}")
+          fi
+        else
+          matching+=("$${dev}")
+        fi
+      fi
+    done < <(list_non_root_whole_disks)
+
+    if (( $${#matching[@]} >= 1 )); then
+      printf '%s\n' "$${matching[0]}"
+      return 0
+    fi
+    sleep "$${delay_s}"
+  done
+
+  if [[ "$${expected_size_gib}" =~ ^[0-9]+$ ]] && (( expected_size_gib > 0 )); then
+    while read -r dev; do
+      [[ -n "$${dev}" ]] || continue
+      if [[ "$(disk_size_gib "$${dev}")" == "$${expected_size_gib}" ]]; then
+        printf '%s\n' "$${dev}"
+        return 0
+      fi
+    done < <(list_non_root_whole_disks)
+  fi
+}
+
+wait_for_block_volume() {
+  local expected_size_gib="$1"
+  local attempts="$${2:-60}"
+  local delay_s="$${3:-2}"
+  local dev
+  local -a matching=()
+
+  for _ in $(seq 1 "$${attempts}"); do
+    matching=()
+    while read -r dev; do
+      [[ -n "$${dev}" ]] || continue
+      if disk_is_block_candidate "$${dev}"; then
+        if [[ "$${expected_size_gib}" =~ ^[0-9]+$ ]] && (( expected_size_gib > 0 )); then
+          if [[ "$(disk_size_gib "$${dev}")" == "$${expected_size_gib}" ]]; then
+            matching+=("$${dev}")
+          fi
+        else
+          matching+=("$${dev}")
+        fi
+      fi
+    done < <(list_non_root_whole_disks)
+
+    if (( $${#matching[@]} >= 1 )); then
+      printf '%s\n' "$${matching[0]}"
+      return 0
+    fi
+    sleep "$${delay_s}"
+  done
+
+  if [[ "$${expected_size_gib}" =~ ^[0-9]+$ ]] && (( expected_size_gib > 0 )); then
+    while read -r dev; do
+      [[ -n "$${dev}" ]] || continue
+      if [[ "$(disk_size_gib "$${dev}")" == "$${expected_size_gib}" ]]; then
+        printf '%s\n' "$${dev}"
+        return 0
+      fi
+    done < <(list_non_root_whole_disks)
+  fi
+}
+
+prepare_mount() {
+  local device="$1"
+  local mount_point="$2"
+  local fstype="$${3:-ext4}"
+
+  [[ -n "$${device}" ]] || return 0
+
+  mkdir -p "$${mount_point}"
+
+  if ! blkid "$${device}" >/dev/null 2>&1; then
+    log "formatting $${device} as $${fstype}"
+    if [[ "$${fstype}" == "xfs" ]]; then
+      mkfs.xfs -f "$${device}"
+    else
+      mkfs.ext4 -F "$${device}"
+    fi
+  fi
+
+  mount "$${device}" "$${mount_point}"
+  chown ubuntu:ubuntu "$${mount_point}"
+
+  local uuid
+  uuid="$(blkid -s UUID -o value "$${device}")"
+  grep -q "$${uuid}" /etc/fstab || echo "UUID=$${uuid} $${mount_point} $${fstype} defaults,nofail 0 2" >> /etc/fstab
+}
+
+storage_targets=()
+
+local_disk_size_gib="${benchmark_local_disk_size_gib}"
+block_volume_size_gib="${benchmark_block_volume_size_gib}"
+local_mount_point="${benchmark_local_mount_point}"
+block_mount_point="${benchmark_block_mount_point}"
+storage_env_path="${benchmark_storage_env_path}"
+
+local_device=""
+block_device=""
+
+if [[ "$${local_disk_size_gib}" =~ ^[0-9]+$ ]] && (( local_disk_size_gib > 0 )); then
+  local_device="$(wait_for_local_disk "$${local_disk_size_gib}")"
+
+  if [[ -n "$${local_device}" ]]; then
+    log "preparing STACKIT instance-local storage device $${local_device} ($(disk_size_gib "$${local_device}") GiB)"
+    unmount_disk_mountpoints "$${local_device}"
+    prepare_mount "$${local_device}" "$${local_mount_point}" "xfs"
+    storage_targets+=("local")
+  else
+    log "no $${local_disk_size_gib} GiB local disk was discovered"
+  fi
+fi
+
+if [[ "$${block_volume_size_gib}" =~ ^[0-9]+$ ]] && (( block_volume_size_gib > 0 )); then
+  block_device="$(wait_for_block_volume "$${block_volume_size_gib}")"
+
+  if [[ -n "$${block_device}" ]]; then
+    log "preparing STACKIT block-volume storage device $${block_device} ($(disk_size_gib "$${block_device}") GiB)"
+    unmount_disk_mountpoints "$${block_device}"
+    prepare_mount "$${block_device}" "$${block_mount_point}" "ext4"
+    storage_targets+=("block")
+  else
+    log "no $${block_volume_size_gib} GiB attached block volume was discovered"
+  fi
+fi
+
+mkdir -p "$(dirname "$${storage_env_path}")"
+{
+  echo "export STORAGE_TARGETS=$(printf '%q' "$${storage_targets[*]}")"
+  echo "export STORAGE_ROOT_DEVICE=$(printf '%q' "$(root_disk)")"
+  [[ -n "$${local_device}" ]] && echo "export STORAGE_LOCAL_DEVICE=$(printf '%q' "$${local_device}")"
+  [[ -n "$${local_device}" ]] && echo "export STORAGE_LOCAL_MOUNT=$(printf '%q' "$${local_mount_point}")"
+  [[ -n "$${block_device}" ]] && echo "export STORAGE_BLOCK_DEVICE=$(printf '%q' "$${block_device}")"
+  [[ -n "$${block_device}" ]] && echo "export STORAGE_BLOCK_MOUNT=$(printf '%q' "$${block_mount_point}")"
+} >"$${storage_env_path}"
+chown ubuntu:ubuntu "$${storage_env_path}"
+
+log "storage benchmark node bootstrap complete"
