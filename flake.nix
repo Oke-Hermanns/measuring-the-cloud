@@ -16,6 +16,33 @@
               "terraform"
             ];
         };
+
+        rAnalysisPackages = with pkgs.rPackages; [
+          dplyr
+          tidyr
+          purrr
+          Cairo
+          ggplot2
+          ggpubr
+          ggpattern
+          ggforce
+          ggrepel
+          directlabels
+          lubridate
+          slider
+          stringr
+          RColorBrewer
+          shades
+          duckdb
+          rmarkdown
+          readr
+          DBI
+          rmarkdown
+          knitr
+          jsonlite
+          scales
+        ] ++ [ pkgs.R ];
+
       in {
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
@@ -26,6 +53,17 @@
             fio
             iperf3
           ];
+        };
+
+        devShells.analysis = pkgs.mkShell {
+          packages = rAnalysisPackages;
+
+          #LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
+          shellHook = ''
+            echo "Analysis dev environment loaded"
+            echo "Includes R + analysis packages"
+          '';
         };
       }
     );
