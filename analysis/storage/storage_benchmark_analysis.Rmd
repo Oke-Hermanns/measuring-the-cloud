@@ -259,10 +259,60 @@ metric_box(
 
 ## Block Storage Performance Class Impact
 
-Filter used: `benchmark_machine_type = g2a.120d`, `storage_target = block`, `io_engine = io_uring`, `block_size = 128k`, `iodepth = 16`. This isolates the block-volume performance class effect on the largest instance type.
+Filter used: `storage_target = block`, `io_engine = io_uring`, `block_size = 128k`, `iodepth = 16`. The comparison is split by instance type because available performance classes differ by instance. Subsections with only one performance class are kept so newly added measurements appear without changing the report structure.
 
-```{r throughput-perf-class, fig.width=12, fig.height=7}
-throughput_perf_class <- sql("
+### g2a.8d
+
+```{r throughput-perf-class-8d, fig.width=12, fig.height=7}
+throughput_perf_class_8d <- sql("
+select block_volume_performance_class, benchmark_rw_mode,
+       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.8d'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '128k'
+  and block_volume_performance_class is not null
+")
+metric_box(
+  throughput_perf_class_8d,
+  x = "block_volume_performance_class",
+  y = "bw_mib_per_sec",
+  fill = "block_volume_performance_class",
+  title = "g2a.8d block storage throughput by performance class",
+  ylab = "Throughput (MiB/s)"
+)
+```
+
+### g2a.30d
+
+```{r throughput-perf-class-30d, fig.width=12, fig.height=7}
+throughput_perf_class_30d <- sql("
+select block_volume_performance_class, benchmark_rw_mode,
+       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.30d'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '128k'
+  and block_volume_performance_class is not null
+")
+metric_box(
+  throughput_perf_class_30d,
+  x = "block_volume_performance_class",
+  y = "bw_mib_per_sec",
+  fill = "block_volume_performance_class",
+  title = "g2a.30d block storage throughput by performance class",
+  ylab = "Throughput (MiB/s)"
+)
+```
+
+### g2a.120d
+
+```{r throughput-perf-class-120d, fig.width=12, fig.height=7}
+throughput_perf_class_120d <- sql("
 select block_volume_performance_class, benchmark_rw_mode,
        primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
 from fio
@@ -274,11 +324,11 @@ where valid_measurement
   and block_volume_performance_class is not null
 ")
 metric_box(
-  throughput_perf_class,
+  throughput_perf_class_120d,
   x = "block_volume_performance_class",
   y = "bw_mib_per_sec",
   fill = "block_volume_performance_class",
-  title = "Throughput by block storage performance class",
+  title = "g2a.120d block storage throughput by performance class",
   ylab = "Throughput (MiB/s)"
 )
 ```
@@ -438,10 +488,58 @@ metric_box(
 
 ## Block Storage Performance Class Impact
 
-Filter used: `benchmark_machine_type = g2a.120d`, `storage_target = block`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`.
+Filter used: `storage_target = block`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. The comparison is split by instance type because available performance classes differ by instance. Subsections with only one performance class are kept so newly added measurements appear without changing the report structure.
 
-```{r iops-perf-class, fig.width=12, fig.height=7}
-iops_perf_class <- sql("
+### g2a.8d
+
+```{r iops-perf-class-8d, fig.width=12, fig.height=7}
+iops_perf_class_8d <- sql("
+select block_volume_performance_class, benchmark_rw_mode, primary_iops as iops
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.8d'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+  and block_volume_performance_class is not null
+")
+metric_box(
+  iops_perf_class_8d,
+  x = "block_volume_performance_class",
+  y = "iops",
+  fill = "block_volume_performance_class",
+  title = "g2a.8d block storage IOPS by performance class",
+  ylab = "IOPS"
+)
+```
+
+### g2a.30d
+
+```{r iops-perf-class-30d, fig.width=12, fig.height=7}
+iops_perf_class_30d <- sql("
+select block_volume_performance_class, benchmark_rw_mode, primary_iops as iops
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.30d'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+  and block_volume_performance_class is not null
+")
+metric_box(
+  iops_perf_class_30d,
+  x = "block_volume_performance_class",
+  y = "iops",
+  fill = "block_volume_performance_class",
+  title = "g2a.30d block storage IOPS by performance class",
+  ylab = "IOPS"
+)
+```
+
+### g2a.120d
+
+```{r iops-perf-class-120d, fig.width=12, fig.height=7}
+iops_perf_class_120d <- sql("
 select block_volume_performance_class, benchmark_rw_mode, primary_iops as iops
 from fio
 where valid_measurement
@@ -452,11 +550,11 @@ where valid_measurement
   and block_volume_performance_class is not null
 ")
 metric_box(
-  iops_perf_class,
+  iops_perf_class_120d,
   x = "block_volume_performance_class",
   y = "iops",
   fill = "block_volume_performance_class",
-  title = "IOPS by block storage performance class",
+  title = "g2a.120d block storage IOPS by performance class",
   ylab = "IOPS"
 )
 ```
@@ -743,12 +841,62 @@ metric_box(
 
 ## Block Storage Performance Class Impact
 
-Filter used: `benchmark_machine_type = g2a.120d`, `storage_target = block`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`.
+Filter used: `storage_target = block`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. The comparison is split by instance type because available performance classes differ by instance. Subsections with only one performance class are kept so newly added measurements appear without changing the report structure.
 
 ### P99
 
-```{r latency-perf-class, fig.width=12, fig.height=7}
-latency_perf_class <- sql("
+#### g2a.8d
+
+```{r latency-perf-class-8d, fig.width=12, fig.height=7}
+latency_perf_class_8d <- sql("
+select block_volume_performance_class, benchmark_rw_mode,
+       primary_clat_p99_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.8d'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+  and block_volume_performance_class is not null
+")
+metric_box(
+  latency_perf_class_8d,
+  x = "block_volume_performance_class",
+  y = "latency_us",
+  fill = "block_volume_performance_class",
+  title = "g2a.8d block storage P99 latency by performance class",
+  ylab = "P99 latency (us)"
+)
+```
+
+#### g2a.30d
+
+```{r latency-perf-class-30d, fig.width=12, fig.height=7}
+latency_perf_class_30d <- sql("
+select block_volume_performance_class, benchmark_rw_mode,
+       primary_clat_p99_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.30d'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+  and block_volume_performance_class is not null
+")
+metric_box(
+  latency_perf_class_30d,
+  x = "block_volume_performance_class",
+  y = "latency_us",
+  fill = "block_volume_performance_class",
+  title = "g2a.30d block storage P99 latency by performance class",
+  ylab = "P99 latency (us)"
+)
+```
+
+#### g2a.120d
+
+```{r latency-perf-class-120d, fig.width=12, fig.height=7}
+latency_perf_class_120d <- sql("
 select block_volume_performance_class, benchmark_rw_mode,
        primary_clat_p99_ns / 1000.0 as latency_us
 from fio
@@ -760,19 +908,69 @@ where valid_measurement
   and block_volume_performance_class is not null
 ")
 metric_box(
-  latency_perf_class,
+  latency_perf_class_120d,
   x = "block_volume_performance_class",
   y = "latency_us",
   fill = "block_volume_performance_class",
-  title = "P99 latency by block storage performance class",
+  title = "g2a.120d block storage P99 latency by performance class",
   ylab = "P99 latency (us)"
 )
 ```
 
 ### P50
 
-```{r latency-perf-class-p50, fig.width=12, fig.height=7}
-latency_perf_class_p50 <- sql("
+#### g2a.8d
+
+```{r latency-perf-class-p50-8d, fig.width=12, fig.height=7}
+latency_perf_class_p50_8d <- sql("
+select block_volume_performance_class, benchmark_rw_mode,
+       primary_clat_p50_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.8d'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+  and block_volume_performance_class is not null
+")
+metric_box(
+  latency_perf_class_p50_8d,
+  x = "block_volume_performance_class",
+  y = "latency_us",
+  fill = "block_volume_performance_class",
+  title = "g2a.8d block storage P50 latency by performance class",
+  ylab = "P50 latency (us)"
+)
+```
+
+#### g2a.30d
+
+```{r latency-perf-class-p50-30d, fig.width=12, fig.height=7}
+latency_perf_class_p50_30d <- sql("
+select block_volume_performance_class, benchmark_rw_mode,
+       primary_clat_p50_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.30d'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+  and block_volume_performance_class is not null
+")
+metric_box(
+  latency_perf_class_p50_30d,
+  x = "block_volume_performance_class",
+  y = "latency_us",
+  fill = "block_volume_performance_class",
+  title = "g2a.30d block storage P50 latency by performance class",
+  ylab = "P50 latency (us)"
+)
+```
+
+#### g2a.120d
+
+```{r latency-perf-class-p50-120d, fig.width=12, fig.height=7}
+latency_perf_class_p50_120d <- sql("
 select block_volume_performance_class, benchmark_rw_mode,
        primary_clat_p50_ns / 1000.0 as latency_us
 from fio
@@ -784,11 +982,11 @@ where valid_measurement
   and block_volume_performance_class is not null
 ")
 metric_box(
-  latency_perf_class_p50,
+  latency_perf_class_p50_120d,
   x = "block_volume_performance_class",
   y = "latency_us",
   fill = "block_volume_performance_class",
-  title = "P50 latency by block storage performance class",
+  title = "g2a.120d block storage P50 latency by performance class",
   ylab = "P50 latency (us)"
 )
 ```

@@ -9,6 +9,7 @@ network/scenarios/*.tfvars
 storage/scenarios/*.tfvars
 
 *.csv
+*.png
 
 # Created by https://www.toptal.com/developers/gitignore/api/git,vim,emacs,linux,macos,direnv,windows,intellij,visualstudiocode,terraform
 # Edit at https://www.toptal.com/developers/gitignore?templates=git,vim,emacs,linux,macos,direnv,windows,intellij,visualstudiocode,terraform
