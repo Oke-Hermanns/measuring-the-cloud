@@ -1,0 +1,529 @@
+#!/usr/bin/env Rscript
+
+`%||%` <- function(a, b) {
+  if (is.null(a) || length(a) == 0 || (length(a) == 1 && is.na(a))) b else a
+}
+
+empty_df <- function(cols) {
+  as.data.frame(
+    setNames(lapply(cols, function(x) character(0)), cols),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+}
+
+ensure_schema <- function(df, cols) {
+  if (is.null(df) || !is.data.frame(df) || ncol(df) == 0) {
+    return(empty_df(cols))
+  }
+  missing_cols <- setdiff(cols, names(df))
+  for (col in missing_cols) df[[col]] <- NA
+  df[, cols, drop = FALSE]
+}
+
+bind_rows_with_schema <- function(df_list, cols) {
+  df_list <- df_list[!vapply(df_list, is.null, logical(1))]
+  df_list <- df_list[vapply(df_list, is.data.frame, logical(1))]
+  if (length(df_list) == 0) return(empty_df(cols))
+  df_list <- lapply(df_list, ensure_schema, cols = cols)
+  out <- do.call(rbind, df_list)
+  rownames(out) <- NULL
+  out
+}
+
+safe_write_csv <- function(df, path, cols) {
+  write.csv(ensure_schema(df, cols), path, row.names = FALSE, na = "")
+}
+
+detect_repo_root <- function() {
+  file_arg <- grep("^--file=", commandArgs(), value = TRUE)
+  if (length(file_arg) > 0) {
+    script_path <- normalizePath(sub("^--file=", "", file_arg[[1]]))
+    return(normalizePath(file.path(dirname(script_path), "..", "..")))
+  }
+  normalizePath(getwd())
+}
+
+to_num <- function(x) suppressWarnings(as.numeric(x))
+
+scalar_value <- function(x) {
+  if (is.null(x) || length(x) == 0) return(NA)
+  if (is.list(x)) return(scalar_value(x[[1]]))
+  x[[1]]
+}
+
+scalar_char <- function(x) {
+  v <- scalar_value(x)
+  if (is.na(v)) NA_character_ else as.character(v)
+}
+
+scalar_num <- function(x) {
+  v <- scalar_value(x)
+  if (is.na(v)) NA_real_ else to_num(v)
+}
+
+normalize_env_value <- function(x) {
+  if (is.null(x) || length(x) == 0) return(NA_character_)
+  x <- as.character(x[[1]])
+  x <- trimws(x)
+  x <- sub("^export[[:space:]]+", "", x, perl = TRUE)
+  x <- sub("[[:space:]]+#.*$", "", x, perl = TRUE)
+  x <- trimws(x)
+  x <- gsub('^"|"$', "", x)
+  x <- gsub("^'|'$", "", x)
+  x <- gsub("\\\\ ", " ", x, perl = TRUE)
+  x
+}
+
+read_env_file <- function(path) {
+  if (!file.exists(path)) return(setNames(character(0), character(0)))
+  lines <- readLines(path, warn = FALSE)
+  lines <- trimws(lines)
+  lines <- lines[nzchar(lines) & !grepl("^#", lines)]
+  lines <- sub("^export[[:space:]]+", "", lines, perl = TRUE)
+  lines <- lines[grepl("=", lines, fixed = TRUE)]
+  if (length(lines) == 0) return(setNames(character(0), character(0)))
+  keys <- sub("=.*$", "", lines)
+  vals <- sub("^[^=]*=", "", lines)
+  vals <- vapply(vals, normalize_env_value, character(1))
+  stats::setNames(vals, keys)
+}
+
+env_get <- function(env, key, default = NA_character_) {
+  if (is.null(env) || length(env) == 0 || is.null(names(env)) || !(key %in% names(env))) return(default)
+  value <- env[[key]]
+  if (is.null(value) || length(value) == 0 || is.na(value) || !nzchar(value)) default else value
+}
+
+parse_size_bytes <- function(x) {
+  if (is.null(x) || is.na(x) || !nzchar(x)) return(NA_real_)
+  x <- toupper(trimws(as.character(x)))
+  m <- regexec("^([0-9.]+)([KMGTP]?)$", x, perl = TRUE)
+  r <- regmatches(x, m)[[1]]
+  if (length(r) < 2) return(to_num(x))
+  value <- to_num(r[[2]])
+  suffix <- r[[3]] %||% ""
+  mult <- switch(suffix, K = 1024, M = 1024^2, G = 1024^3, T = 1024^4, P = 1024^5, 1)
+  value * mult
+}
+
+detect_provider <- function(scenario_name) {
+  if (grepl("^stackit[_-]", scenario_name)) return("stackit")
+  if (grepl("^aws[_-]", scenario_name)) return("aws")
+  NA_character_
+}
+
+derive_block_volume_performance_class <- function(scenario_name, benchmark_machine_type) {
+  if (!is.null(scenario_name) && grepl("perf[0-9]+", scenario_name)) {
+    perf <- sub(".*(perf[0-9]+).*", "\\1", scenario_name)
+    return(paste0("storage_premium_", perf))
+  }
+  if (identical(benchmark_machine_type, "g2a.30d")) return("storage_premium_perf6")
+  if (identical(benchmark_machine_type, "g2a.8d")) return("storage_premium_perf12")
+  NA_character_
+}
+
+access_pattern_for_rw <- function(rw) {
+  if (grepl("^rand", rw)) return("random")
+  if (rw %in% c("read", "write")) return("sequential")
+  NA_character_
+}
+
+direction_for_rw <- function(rw) {
+  if (grepl("read$", rw)) return("read")
+  if (grepl("write$", rw)) return("write")
+  NA_character_
+}
+
+first_line <- function(path) {
+  if (!file.exists(path)) return(NA_character_)
+  lines <- readLines(path, warn = FALSE)
+  lines <- trimws(lines)
+  lines <- lines[nzchar(lines)]
+  if (length(lines) == 0) NA_character_ else lines[[1]]
+}
+
+read_fio_doc <- function(path) {
+  if (!file.exists(path)) return(NULL)
+  txt <- paste(readLines(path, warn = FALSE), collapse = "\n")
+  start <- regexpr("{", txt, fixed = TRUE)[[1]]
+  end <- max(unlist(gregexpr("}", txt, fixed = TRUE)))
+  if (is.na(start) || start < 1 || is.na(end) || end < start) return(NULL)
+  json_txt <- substr(txt, start, end)
+  tryCatch(jsonlite::fromJSON(json_txt, simplifyVector = FALSE), error = function(e) NULL)
+}
+
+get_path <- function(x, path, default = NA) {
+  cur <- x
+  for (part in path) {
+    if (is.null(cur) || !is.list(cur) || is.null(cur[[part]])) return(default)
+    cur <- cur[[part]]
+  }
+  if (is.null(cur) || length(cur) == 0) return(default)
+  if (is.list(cur) && !is.data.frame(cur)) return(cur)
+  cur[[1]]
+}
+
+percentile_value <- function(clat, pct_key) {
+  if (is.null(clat) || !is.list(clat)) return(NA_real_)
+  pct <- clat[["percentile"]]
+  if (is.null(pct) || !is.list(pct) || is.null(pct[[pct_key]])) return(NA_real_)
+  to_num(scalar_value(pct[[pct_key]]))
+}
+
+scenario_fields <- c(
+  "run_id", "scenario_name", "provider", "access_mode", "os_tuning", "benchmark_host",
+  "benchmark_private_ip", "ssh_user", "benchmark_cpu_list", "benchmark_machine_type",
+  "benchmark_availability_zone", "block_volume_performance_class", "storage_targets_raw", "storage_root_device",
+  "storage_local_device", "storage_local_mount", "storage_block_device", "storage_block_mount",
+  "scenario_source_file", "storage_env_file"
+)
+
+benchmark_fields <- c(
+  scenario_fields,
+  "benchmark_name", "benchmark_source_file", "storage_target", "storage_target_mount",
+  "storage_target_device", "benchmark_tool", "benchmark_rw_mode", "access_pattern", "direction",
+  "io_engine", "block_size", "block_size_bytes", "iodepth", "numjobs", "runtime_sec", "direct",
+  "group_reporting", "time_based", "fio_size", "repetitions_expected", "cooldown_sec"
+)
+
+fio_fields <- c(
+  benchmark_fields,
+  "repetition", "fio_json_file", "fio_log_file", "fio_cmd_file", "fio_version", "fio_timestamp",
+  "fio_timestamp_ms", "fio_time", "fio_jobname", "fio_error", "fio_job_runtime_ms", "fio_elapsed_sec",
+  "fio_eta", "usr_cpu", "sys_cpu", "ctx", "majf", "minf", "iodepth_level", "iodepth_submit",
+  "iodepth_complete", "latency_ns", "latency_us", "latency_ms", "latency_depth", "latency_target",
+  "latency_percentile", "latency_window", "read_io_bytes", "read_bw_bytes", "read_bw_kib_per_sec",
+  "read_iops", "read_runtime_ms", "read_total_ios", "read_short_ios", "read_drop_ios",
+  "read_clat_mean_ns", "read_clat_p50_ns", "read_clat_p95_ns", "read_clat_p99_ns",
+  "read_clat_p999_ns", "read_clat_p9999_ns", "read_clat_min_ns", "read_clat_max_ns",
+  "read_clat_stddev_ns", "read_clat_samples", "write_io_bytes", "write_bw_bytes",
+  "write_bw_kib_per_sec", "write_iops", "write_runtime_ms", "write_total_ios", "write_short_ios",
+  "write_drop_ios", "write_clat_mean_ns", "write_clat_p50_ns", "write_clat_p95_ns",
+  "write_clat_p99_ns", "write_clat_p999_ns", "write_clat_p9999_ns", "write_clat_min_ns",
+  "write_clat_max_ns", "write_clat_stddev_ns", "write_clat_samples", "primary_io_bytes",
+  "primary_bw_bytes_per_sec", "primary_bw_kib_per_sec", "primary_iops", "primary_runtime_ms",
+  "primary_total_ios", "primary_short_ios", "primary_drop_ios", "primary_clat_mean_ns",
+  "primary_clat_p50_ns", "primary_clat_p95_ns", "primary_clat_p99_ns", "primary_clat_p999_ns",
+  "primary_clat_p9999_ns", "primary_clat_min_ns", "primary_clat_max_ns", "primary_clat_stddev_ns",
+  "primary_clat_samples", "valid_measurement", "failure_reason"
+)
+
+failure_fields <- c(
+  benchmark_fields, "repetition", "fio_json_file", "fio_log_file", "fio_cmd_file", "fio_error",
+  "failure_reason"
+)
+
+scenario_row <- function(run_id, scenario_name, scenario_env, storage_env, scenario_dir) {
+  storage_targets <- env_get(scenario_env, "STORAGE_TARGETS", env_get(storage_env, "STORAGE_TARGETS"))
+  data.frame(
+    run_id = run_id,
+    scenario_name = scenario_name,
+    provider = detect_provider(scenario_name),
+    access_mode = env_get(scenario_env, "ACCESS_MODE"),
+    os_tuning = env_get(scenario_env, "OS_TUNING"),
+    benchmark_host = env_get(scenario_env, "BENCHMARK_HOST"),
+    benchmark_private_ip = env_get(scenario_env, "BENCHMARK_PRIVATE_IP"),
+    ssh_user = env_get(scenario_env, "SSH_USER"),
+    benchmark_cpu_list = env_get(scenario_env, "BENCHMARK_CPU_LIST"),
+    benchmark_machine_type = env_get(scenario_env, "BENCHMARK_MACHINE_TYPE"),
+    benchmark_availability_zone = env_get(scenario_env, "BENCHMARK_AVAILABILITY_ZONE"),
+    block_volume_performance_class = derive_block_volume_performance_class(
+      scenario_name,
+      env_get(scenario_env, "BENCHMARK_MACHINE_TYPE")
+    ),
+    storage_targets_raw = storage_targets,
+    storage_root_device = env_get(scenario_env, "STORAGE_ROOT_DEVICE", env_get(storage_env, "STORAGE_ROOT_DEVICE")),
+    storage_local_device = env_get(scenario_env, "STORAGE_LOCAL_DEVICE", env_get(storage_env, "STORAGE_LOCAL_DEVICE")),
+    storage_local_mount = env_get(scenario_env, "STORAGE_LOCAL_MOUNT", env_get(storage_env, "STORAGE_LOCAL_MOUNT")),
+    storage_block_device = env_get(scenario_env, "STORAGE_BLOCK_DEVICE", env_get(storage_env, "STORAGE_BLOCK_DEVICE")),
+    storage_block_mount = env_get(scenario_env, "STORAGE_BLOCK_MOUNT", env_get(storage_env, "STORAGE_BLOCK_MOUNT")),
+    scenario_source_file = file.path(scenario_dir, "scenario.env"),
+    storage_env_file = file.path(scenario_dir, "storage.env"),
+    stringsAsFactors = FALSE
+  )
+}
+
+benchmark_row <- function(run_id, scenario_name, scenario_env, storage_env, benchmark_name, storage_target, benchmark_env, benchmark_dir, scenario_dir) {
+  rw_mode <- env_get(benchmark_env, "FIO_RW")
+  data.frame(
+    run_id = run_id,
+    scenario_name = scenario_name,
+    provider = detect_provider(scenario_name),
+    access_mode = env_get(scenario_env, "ACCESS_MODE"),
+    os_tuning = env_get(benchmark_env, "OS_TUNING", env_get(scenario_env, "OS_TUNING")),
+    benchmark_host = env_get(scenario_env, "BENCHMARK_HOST"),
+    benchmark_private_ip = env_get(scenario_env, "BENCHMARK_PRIVATE_IP"),
+    ssh_user = env_get(scenario_env, "SSH_USER"),
+    benchmark_cpu_list = env_get(benchmark_env, "BENCHMARK_CPU_LIST", env_get(scenario_env, "BENCHMARK_CPU_LIST")),
+    benchmark_machine_type = env_get(scenario_env, "BENCHMARK_MACHINE_TYPE"),
+    benchmark_availability_zone = env_get(scenario_env, "BENCHMARK_AVAILABILITY_ZONE"),
+    block_volume_performance_class = derive_block_volume_performance_class(
+      scenario_name,
+      env_get(scenario_env, "BENCHMARK_MACHINE_TYPE")
+    ),
+    storage_targets_raw = env_get(scenario_env, "STORAGE_TARGETS", env_get(storage_env, "STORAGE_TARGETS")),
+    storage_root_device = env_get(scenario_env, "STORAGE_ROOT_DEVICE", env_get(storage_env, "STORAGE_ROOT_DEVICE")),
+    storage_local_device = env_get(scenario_env, "STORAGE_LOCAL_DEVICE", env_get(storage_env, "STORAGE_LOCAL_DEVICE")),
+    storage_local_mount = env_get(scenario_env, "STORAGE_LOCAL_MOUNT", env_get(storage_env, "STORAGE_LOCAL_MOUNT")),
+    storage_block_device = env_get(scenario_env, "STORAGE_BLOCK_DEVICE", env_get(storage_env, "STORAGE_BLOCK_DEVICE")),
+    storage_block_mount = env_get(scenario_env, "STORAGE_BLOCK_MOUNT", env_get(storage_env, "STORAGE_BLOCK_MOUNT")),
+    scenario_source_file = file.path(scenario_dir, "scenario.env"),
+    storage_env_file = file.path(scenario_dir, "storage.env"),
+    benchmark_name = benchmark_name,
+    benchmark_source_file = file.path(benchmark_dir, "benchmark.env"),
+    storage_target = storage_target,
+    storage_target_mount = env_get(benchmark_env, "STORAGE_TARGET_MOUNT"),
+    storage_target_device = env_get(benchmark_env, "STORAGE_TARGET_DEVICE"),
+    benchmark_tool = env_get(benchmark_env, "BENCHMARK_TOOL"),
+    benchmark_rw_mode = rw_mode,
+    access_pattern = access_pattern_for_rw(rw_mode),
+    direction = direction_for_rw(rw_mode),
+    io_engine = env_get(benchmark_env, "FIO_IOENGINE"),
+    block_size = env_get(benchmark_env, "FIO_BS"),
+    block_size_bytes = parse_size_bytes(env_get(benchmark_env, "FIO_BS")),
+    iodepth = to_num(env_get(benchmark_env, "FIO_IODEPTH")),
+    numjobs = to_num(env_get(benchmark_env, "FIO_NUMJOBS")),
+    runtime_sec = to_num(env_get(benchmark_env, "FIO_RUNTIME_SEC")),
+    direct = to_num(env_get(benchmark_env, "FIO_DIRECT")),
+    group_reporting = to_num(env_get(benchmark_env, "FIO_GROUP_REPORTING")),
+    time_based = to_num(env_get(benchmark_env, "FIO_TIME_BASED")),
+    fio_size = env_get(benchmark_env, "FIO_SIZE"),
+    repetitions_expected = to_num(env_get(benchmark_env, "REPETITIONS")),
+    cooldown_sec = to_num(env_get(benchmark_env, "COOLDOWN_SEC")),
+    benchmark_dir = benchmark_dir,
+    stringsAsFactors = FALSE
+  )
+}
+
+parse_job_metrics <- function(job, section_name) {
+  section <- if (!is.null(job[[section_name]])) job[[section_name]] else list()
+  clat <- if (!is.null(section$clat_ns)) section$clat_ns else list()
+  data.frame(
+    io_bytes = scalar_num(section$io_bytes),
+    bw_bytes = scalar_num(section$bw_bytes),
+    bw_kib_per_sec = scalar_num(section$bw),
+    iops = scalar_num(section$iops),
+    runtime_ms = scalar_num(section$runtime),
+    total_ios = scalar_num(section$total_ios),
+    short_ios = scalar_num(section$short_ios),
+    drop_ios = scalar_num(section$drop_ios),
+    clat_mean_ns = scalar_num(clat$mean),
+    clat_p50_ns = percentile_value(clat, "50.000000"),
+    clat_p95_ns = percentile_value(clat, "95.000000"),
+    clat_p99_ns = percentile_value(clat, "99.000000"),
+    clat_p999_ns = percentile_value(clat, "99.900000"),
+    clat_p9999_ns = percentile_value(clat, "99.990000"),
+    clat_min_ns = scalar_num(clat$min),
+    clat_max_ns = scalar_num(clat$max),
+    clat_stddev_ns = scalar_num(clat$stddev),
+    clat_samples = scalar_num(clat$N),
+    stringsAsFactors = FALSE
+  )
+}
+
+parse_fio_row <- function(run_id, scenario_name, scenario_env, storage_env, benchmark_name, storage_target, benchmark_env,
+                          benchmark_dir, scenario_dir, rep_dir, rep, json_path, log_path, cmd_path) {
+  doc <- read_fio_doc(json_path)
+  if (is.null(doc) || is.null(doc$jobs) || length(doc$jobs) == 0) return(NULL)
+
+  job <- doc$jobs[[1]]
+  job_opts <- if (!is.null(job[["job options"]])) job[["job options"]] else list()
+  direction <- direction_for_rw(env_get(benchmark_env, "FIO_RW"))
+  primary_section <- if (identical(direction, "read")) "read" else "write"
+  other_section <- if (identical(primary_section, "read")) "write" else "read"
+  read_metrics <- parse_job_metrics(job, "read")
+  write_metrics <- parse_job_metrics(job, "write")
+  primary_metrics <- if (identical(primary_section, "read")) read_metrics else write_metrics
+  error_code <- scalar_num(job$error)
+  failure_reason <- if (!is.na(error_code) && error_code != 0) first_line(log_path) else NA_character_
+  valid_measurement <- !is.na(error_code) && error_code == 0 && !is.na(primary_metrics$bw_bytes[[1]]) && primary_metrics$bw_bytes[[1]] > 0
+
+  base <- benchmark_row(run_id, scenario_name, scenario_env, storage_env, benchmark_name, storage_target, benchmark_env, benchmark_dir, scenario_dir)
+  base$repetition <- rep
+  base$fio_json_file <- json_path
+  base$fio_log_file <- log_path
+  base$fio_cmd_file <- cmd_path
+  base$fio_version <- if (!is.null(doc[["fio version"]])) as.character(doc[["fio version"]]) else NA_character_
+  base$fio_timestamp <- if (!is.null(doc[["timestamp"]])) as.character(doc[["timestamp"]]) else NA_character_
+  base$fio_timestamp_ms <- scalar_num(doc$timestamp_ms)
+  base$fio_time <- if (!is.null(doc[["time"]])) as.character(doc[["time"]]) else NA_character_
+  base$fio_jobname <- if (!is.null(job$jobname)) as.character(job$jobname) else NA_character_
+  base$fio_error <- error_code
+  base$fio_job_runtime_ms <- scalar_num(job$job_runtime)
+  base$fio_elapsed_sec <- scalar_num(job$elapsed)
+  base$fio_eta <- scalar_num(job$eta)
+  base$usr_cpu <- scalar_num(job$usr_cpu)
+  base$sys_cpu <- scalar_num(job$sys_cpu)
+  base$ctx <- scalar_num(job$ctx)
+  base$majf <- scalar_num(job$majf)
+  base$minf <- scalar_num(job$minf)
+  base$iodepth_level <- scalar_num(job$iodepth_level)
+  base$iodepth_submit <- scalar_num(job$iodepth_submit)
+  base$iodepth_complete <- scalar_num(job$iodepth_complete)
+  base$latency_ns <- scalar_num(job$latency_ns)
+  base$latency_us <- scalar_num(job$latency_us)
+  base$latency_ms <- scalar_num(job$latency_ms)
+  base$latency_depth <- scalar_num(job$latency_depth)
+  base$latency_target <- scalar_num(job$latency_target)
+  base$latency_percentile <- scalar_num(job$latency_percentile)
+  base$latency_window <- scalar_num(job$latency_window)
+
+  base$read_io_bytes <- read_metrics$io_bytes
+  base$read_bw_bytes <- read_metrics$bw_bytes
+  base$read_bw_kib_per_sec <- read_metrics$bw_kib_per_sec
+  base$read_iops <- read_metrics$iops
+  base$read_runtime_ms <- read_metrics$runtime_ms
+  base$read_total_ios <- read_metrics$total_ios
+  base$read_short_ios <- read_metrics$short_ios
+  base$read_drop_ios <- read_metrics$drop_ios
+  base$read_clat_mean_ns <- read_metrics$clat_mean_ns
+  base$read_clat_p50_ns <- read_metrics$clat_p50_ns
+  base$read_clat_p95_ns <- read_metrics$clat_p95_ns
+  base$read_clat_p99_ns <- read_metrics$clat_p99_ns
+  base$read_clat_p999_ns <- read_metrics$clat_p999_ns
+  base$read_clat_p9999_ns <- read_metrics$clat_p9999_ns
+  base$read_clat_min_ns <- read_metrics$clat_min_ns
+  base$read_clat_max_ns <- read_metrics$clat_max_ns
+  base$read_clat_stddev_ns <- read_metrics$clat_stddev_ns
+  base$read_clat_samples <- read_metrics$clat_samples
+
+  base$write_io_bytes <- write_metrics$io_bytes
+  base$write_bw_bytes <- write_metrics$bw_bytes
+  base$write_bw_kib_per_sec <- write_metrics$bw_kib_per_sec
+  base$write_iops <- write_metrics$iops
+  base$write_runtime_ms <- write_metrics$runtime_ms
+  base$write_total_ios <- write_metrics$total_ios
+  base$write_short_ios <- write_metrics$short_ios
+  base$write_drop_ios <- write_metrics$drop_ios
+  base$write_clat_mean_ns <- write_metrics$clat_mean_ns
+  base$write_clat_p50_ns <- write_metrics$clat_p50_ns
+  base$write_clat_p95_ns <- write_metrics$clat_p95_ns
+  base$write_clat_p99_ns <- write_metrics$clat_p99_ns
+  base$write_clat_p999_ns <- write_metrics$clat_p999_ns
+  base$write_clat_p9999_ns <- write_metrics$clat_p9999_ns
+  base$write_clat_min_ns <- write_metrics$clat_min_ns
+  base$write_clat_max_ns <- write_metrics$clat_max_ns
+  base$write_clat_stddev_ns <- write_metrics$clat_stddev_ns
+  base$write_clat_samples <- write_metrics$clat_samples
+
+  base$primary_io_bytes <- if (identical(direction, "read")) base$read_io_bytes else base$write_io_bytes
+  base$primary_bw_bytes_per_sec <- if (identical(direction, "read")) base$read_bw_bytes else base$write_bw_bytes
+  base$primary_bw_kib_per_sec <- if (identical(direction, "read")) base$read_bw_kib_per_sec else base$write_bw_kib_per_sec
+  base$primary_iops <- if (identical(direction, "read")) base$read_iops else base$write_iops
+  base$primary_runtime_ms <- if (identical(direction, "read")) base$read_runtime_ms else base$write_runtime_ms
+  base$primary_total_ios <- if (identical(direction, "read")) base$read_total_ios else base$write_total_ios
+  base$primary_short_ios <- if (identical(direction, "read")) base$read_short_ios else base$write_short_ios
+  base$primary_drop_ios <- if (identical(direction, "read")) base$read_drop_ios else base$write_drop_ios
+  base$primary_clat_mean_ns <- if (identical(direction, "read")) base$read_clat_mean_ns else base$write_clat_mean_ns
+  base$primary_clat_p50_ns <- if (identical(direction, "read")) base$read_clat_p50_ns else base$write_clat_p50_ns
+  base$primary_clat_p95_ns <- if (identical(direction, "read")) base$read_clat_p95_ns else base$write_clat_p95_ns
+  base$primary_clat_p99_ns <- if (identical(direction, "read")) base$read_clat_p99_ns else base$write_clat_p99_ns
+  base$primary_clat_p999_ns <- if (identical(direction, "read")) base$read_clat_p999_ns else base$write_clat_p999_ns
+  base$primary_clat_p9999_ns <- if (identical(direction, "read")) base$read_clat_p9999_ns else base$write_clat_p9999_ns
+  base$primary_clat_min_ns <- if (identical(direction, "read")) base$read_clat_min_ns else base$write_clat_min_ns
+  base$primary_clat_max_ns <- if (identical(direction, "read")) base$read_clat_max_ns else base$write_clat_max_ns
+  base$primary_clat_stddev_ns <- if (identical(direction, "read")) base$read_clat_stddev_ns else base$write_clat_stddev_ns
+  base$primary_clat_samples <- if (identical(direction, "read")) base$read_clat_samples else base$write_clat_samples
+  base$valid_measurement <- valid_measurement
+  base$failure_reason <- failure_reason
+
+  base
+}
+
+parse_storage_run <- function(repo_root, run_id) {
+  run_dir <- file.path(repo_root, "artifacts", "storage", run_id)
+  if (!dir.exists(run_dir)) stop(sprintf("Storage artifacts directory not found: %s", run_dir))
+
+  scenario_dirs <- list.dirs(run_dir, full.names = TRUE, recursive = FALSE)
+  scenario_dirs <- scenario_dirs[file.exists(file.path(scenario_dirs, "scenario.env"))]
+  if (length(scenario_dirs) == 0) return(list(
+    scenarios = empty_df(scenario_fields),
+    benchmarks = empty_df(benchmark_fields),
+    fio = empty_df(fio_fields),
+    failures = empty_df(failure_fields)
+  ))
+
+  scenario_rows <- list()
+  benchmark_rows <- list()
+  fio_rows <- list()
+
+  for (scenario_dir in scenario_dirs) {
+    scenario_name <- basename(scenario_dir)
+    scenario_env <- read_env_file(file.path(scenario_dir, "scenario.env"))
+    storage_env <- read_env_file(file.path(scenario_dir, "storage.env"))
+    scenario_rows[[length(scenario_rows) + 1]] <- scenario_row(run_id, scenario_name, scenario_env, storage_env, scenario_dir)
+
+    benchmark_env_paths <- Sys.glob(file.path(scenario_dir, "benchmarks", "*", "*", "benchmark.env"))
+    benchmark_env_paths <- sort(benchmark_env_paths)
+
+    for (benchmark_env_path in benchmark_env_paths) {
+      benchmark_target_dir <- dirname(benchmark_env_path)
+      benchmark_dir <- dirname(benchmark_target_dir)
+      benchmark_name <- basename(benchmark_dir)
+      storage_target <- basename(benchmark_target_dir)
+      benchmark_env <- read_env_file(benchmark_env_path)
+      benchmark_rows[[length(benchmark_rows) + 1]] <- benchmark_row(
+        run_id, scenario_name, scenario_env, storage_env, benchmark_name, storage_target, benchmark_env, benchmark_dir, scenario_dir
+      )
+
+      rep_json_paths <- Sys.glob(file.path(benchmark_target_dir, "rep-*", "fio.json"))
+      rep_json_paths <- sort(rep_json_paths)
+      for (json_path in rep_json_paths) {
+        rep_dir <- dirname(json_path)
+        rep <- to_num(sub("^rep-", "", basename(rep_dir)))
+        log_path <- file.path(rep_dir, "fio.log")
+        cmd_path <- file.path(rep_dir, "fio.cmd")
+        row <- parse_fio_row(
+          run_id, scenario_name, scenario_env, storage_env, benchmark_name, storage_target, benchmark_env,
+          benchmark_dir, scenario_dir, rep_dir, rep, json_path, log_path, cmd_path
+        )
+        if (!is.null(row)) fio_rows[[length(fio_rows) + 1]] <- row
+      }
+    }
+  }
+
+  fio_df <- bind_rows_with_schema(fio_rows, fio_fields)
+  list(
+    scenarios = bind_rows_with_schema(scenario_rows, scenario_fields),
+    benchmarks = bind_rows_with_schema(benchmark_rows, benchmark_fields),
+    fio = fio_df,
+    failures = ensure_schema(fio_df[!as.logical(fio_df$valid_measurement), , drop = FALSE], failure_fields)
+  )
+}
+
+discover_run_ids <- function(repo_root, result_id) {
+  storage_root <- file.path(repo_root, "artifacts", "storage")
+  if (!dir.exists(storage_root)) return(character(0))
+  if (!identical(result_id, "all")) {
+    run_dir <- file.path(storage_root, result_id)
+    if (!dir.exists(run_dir)) stop(sprintf("Storage run not found: %s", run_dir))
+    return(result_id)
+  }
+  dirs <- list.dirs(storage_root, full.names = FALSE, recursive = FALSE)
+  dirs[grepl("^run-[0-9]{8}-[0-9]{6}$", dirs)]
+}
+
+args <- commandArgs(trailingOnly = TRUE)
+result_id <- if (length(args) >= 1 && nzchar(args[[1]])) args[[1]] else "all"
+repo_root <- detect_repo_root()
+out_dir <- file.path(repo_root, "analysis", "storage", result_id)
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+run_ids <- discover_run_ids(repo_root, result_id)
+if (length(run_ids) == 0) stop("No storage runs found")
+
+parsed_runs <- lapply(run_ids, function(run_id) parse_storage_run(repo_root, run_id))
+
+scenarios_df <- bind_rows_with_schema(lapply(parsed_runs, `[[`, "scenarios"), scenario_fields)
+benchmarks_df <- bind_rows_with_schema(lapply(parsed_runs, `[[`, "benchmarks"), benchmark_fields)
+fio_df <- bind_rows_with_schema(lapply(parsed_runs, `[[`, "fio"), fio_fields)
+failures_df <- bind_rows_with_schema(lapply(parsed_runs, `[[`, "failures"), failure_fields)
+
+safe_write_csv(scenarios_df, file.path(out_dir, "storage_scenarios.csv"), scenario_fields)
+safe_write_csv(benchmarks_df, file.path(out_dir, "storage_benchmarks.csv"), benchmark_fields)
+safe_write_csv(fio_df, file.path(out_dir, "storage_fio.csv"), fio_fields)
+safe_write_csv(failures_df, file.path(out_dir, "storage_failures.csv"), failure_fields)
+
+message(sprintf("Wrote storage CSVs to %s", out_dir))
+message(sprintf("scenarios=%d benchmarks=%d fio=%d failures=%d", nrow(scenarios_df), nrow(benchmarks_df), nrow(fio_df), nrow(failures_df)))

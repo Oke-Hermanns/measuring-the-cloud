@@ -1,0 +1,1072 @@
+---
+title: "Storage Benchmark Analysis"
+params:
+  result_id: "all"
+  note: null
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 12, fig.height = 7)
+
+rmd_dir <- dirname(normalizePath(knitr::current_input(dir = TRUE)))
+repo_root <- normalizePath(file.path(rmd_dir, "..", ".."))
+
+source(file.path(repo_root, "analysis", "storage", "prelude.r"))
+options(scipen = 999)
+
+result_id <- params$result_id
+results_dir <- file.path(repo_root, "analysis", "storage", result_id)
+
+required_csvs <- c(
+  "storage_scenarios.csv",
+  "storage_benchmarks.csv",
+  "storage_fio.csv",
+  "storage_failures.csv"
+)
+
+if (!all(file.exists(file.path(results_dir, required_csvs)))) {
+  stop(sprintf("Missing storage CSVs in %s. Run analysis/storage/build_csv.R first.", results_dir))
+}
+
+csv_sql_path <- function(name) {
+  gsub("'", "''", normalizePath(file.path(results_dir, name), mustWork = TRUE), fixed = TRUE)
+}
+
+sql("select 1")
+con <- duckdbcons[[":memory:"]]
+DBI::dbExecute(con, "drop table if exists scenarios")
+DBI::dbExecute(con, "drop table if exists benchmarks")
+DBI::dbExecute(con, "drop table if exists fio")
+DBI::dbExecute(con, "drop table if exists failures")
+DBI::dbExecute(con, sprintf("create table scenarios as select * from read_csv_auto('%s')", csv_sql_path("storage_scenarios.csv")))
+DBI::dbExecute(con, sprintf("create table benchmarks as select * from read_csv_auto('%s')", csv_sql_path("storage_benchmarks.csv")))
+DBI::dbExecute(con, sprintf("create table fio as select * from read_csv_auto('%s')", csv_sql_path("storage_fio.csv")))
+DBI::dbExecute(con, sprintf("create table failures as select * from read_csv_auto('%s')", csv_sql_path("storage_failures.csv")))
+
+machine_levels <- c("g2a.8d", "g2a.30d", "g2a.120d")
+workload_levels <- c("randread", "randwrite", "read", "write")
+engine_levels <- c("psync", "io_uring")
+block_size_levels <- c("4k", "128k")
+target_levels <- c("local", "block")
+perf_class_order <- sql("
+select distinct block_volume_performance_class
+from scenarios
+where block_volume_performance_class is not null
+order by block_volume_performance_class
+")$block_volume_performance_class
+perf_class_order <- perf_class_order[order(as.integer(sub(".*perf([0-9]+).*", "\\1", perf_class_order)))]
+
+wrap_subtitle <- function(text, width = 78) {
+  if (is.null(text) || !nzchar(text)) return(NULL)
+  paste(strwrap(text, width = width), collapse = "\n")
+}
+
+apply_factor_levels <- function(df) {
+  if ("benchmark_machine_type" %in% names(df)) {
+    df$benchmark_machine_type <- factor(df$benchmark_machine_type, levels = machine_levels)
+  }
+  if ("benchmark_rw_mode" %in% names(df)) {
+    df$benchmark_rw_mode <- factor(df$benchmark_rw_mode, levels = workload_levels)
+  }
+  if ("io_engine" %in% names(df)) {
+    df$io_engine <- factor(df$io_engine, levels = engine_levels)
+  }
+  if ("block_size" %in% names(df)) {
+    df$block_size <- factor(df$block_size, levels = block_size_levels)
+  }
+  if ("storage_target" %in% names(df)) {
+    df$storage_target <- factor(df$storage_target, levels = target_levels)
+  }
+  if ("block_volume_performance_class" %in% names(df)) {
+    df$block_volume_performance_class <- factor(df$block_volume_performance_class, levels = perf_class_order)
+  }
+  if ("latency_metric" %in% names(df)) {
+    df$latency_metric <- factor(df$latency_metric, levels = c("avg", "p50", "p99", "p99.9"))
+  }
+  df
+}
+
+metric_box <- function(df, x, y, fill = NULL, facet = "benchmark_rw_mode", title = NULL,
+                       subtitle = NULL, ylab = NULL, ncol = 2, y_zero = TRUE) {
+  if (nrow(df) == 0) return(show_no_data_plot("No data for this comparison."))
+  df <- apply_factor_levels(df)
+  mapping <- if (is.null(fill)) {
+    aes(x = .data[[x]], y = .data[[y]])
+  } else {
+    aes(x = .data[[x]], y = .data[[y]], fill = .data[[fill]])
+  }
+  p <- ggplot(df, mapping) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.72) +
+    geom_jitter(width = 0.12, alpha = 0.55, size = 1.5) +
+    labs(title = title, subtitle = wrap_subtitle(subtitle), x = NULL, y = ylab, fill = NULL) +
+    base_plot_theme()
+
+  if (y_zero) {
+    p <- p + scale_y_continuous(labels = comma, limits = c(0, NA), expand = expansion(mult = c(0, 0.06)))
+  } else {
+    p <- p + scale_y_continuous(labels = comma, expand = expansion(mult = c(0.02, 0.06)))
+  }
+
+  if (!is.null(facet)) {
+    p <- p + facet_wrap(stats::as.formula(paste("~", facet)), ncol = ncol, scales = "fixed")
+  }
+
+  p + guides(fill = "none")
+}
+
+metric_summary <- function(df, group_cols, metric_col) {
+  if (nrow(df) == 0) return(df)
+  aggregate(
+    df[[metric_col]],
+    df[group_cols],
+    function(x) c(median = median(x, na.rm = TRUE), min = min(x, na.rm = TRUE), max = max(x, na.rm = TRUE), n = length(x))
+  )
+}
+
+validate_rows <- sql("
+select
+  count(*) as fio_rows,
+  sum(case when valid_measurement then 1 else 0 end) as valid_rows,
+  sum(case when not valid_measurement then 1 else 0 end) as invalid_rows,
+  count(distinct run_id) as runs
+from fio
+")
+```
+
+This report analyzes storage benchmark results from `r result_id`.
+
+```{r note, results='asis', echo=FALSE}
+if (!is.null(params$note) && nzchar(params$note)) {
+  cat(sprintf("> %s\n\n", params$note))
+}
+```
+
+# Overview
+
+The report intentionally avoids using `benchmark_name` as a plot facet for impact analysis. The benchmark name is a derived label that includes dimensions such as block size and I/O engine. The plots below compare one dimension at a time while fixing the other relevant dimensions in SQL.
+
+Throughput plots focus on `128k`, `io_uring`, and `iodepth = 16` unless the plot explicitly compares block size. IOPS and latency plots focus on `4k`, `io_uring`, and `iodepth = 32` unless the plot explicitly compares I/O engine. The `psync/4k` measurements use `iodepth = 1`. This avoids mixing the latency-oriented `psync_4k` workloads into throughput comparisons and avoids mixing `128k` workloads into latency comparisons.
+
+```{r coverage-counts}
+coverage_counts <- sql("
+select
+  (select count(*) from scenarios) as scenarios,
+  (select count(*) from benchmarks) as benchmark_rows,
+  (select count(*) from fio) as fio_rows,
+  (select count(*) from failures) as failures,
+  (select sum(case when valid_measurement then 1 else 0 end) from fio) as valid_fio_rows
+")
+kable(coverage_counts, caption = "Parsed storage benchmark data")
+```
+
+```{r filter-policy, echo=FALSE}
+filter_policy <- data.frame(
+  section = c("Throughput", "Throughput block-size impact", "IOPS", "Latency"),
+  default_filter = c(
+    "block_size = 128k, io_engine = io_uring, iodepth = 16, psync omitted",
+    "io_engine = io_uring, compares block_size on x-axis; 4k uses iodepth = 32 and 128k uses iodepth = 16",
+    "block_size = 4k, io_engine fixed unless comparing I/O engine; io_uring uses iodepth = 32 and psync uses iodepth = 1",
+    "block_size = 4k, io_uring uses iodepth = 32, 128k omitted except diagnostic block-size plots"
+  )
+)
+kable(filter_policy, caption = "Default filtering policy")
+```
+
+```{r scenario-table}
+scenario_table <- sql("
+select run_id, scenario_name, benchmark_machine_type, benchmark_availability_zone,
+       os_tuning, access_mode, storage_targets_raw, block_volume_performance_class
+from scenarios
+order by run_id, scenario_name
+")
+kable(scenario_table, caption = "Scenario coverage")
+```
+
+```{r dimension-coverage}
+dimension_coverage <- sql("
+select benchmark_machine_type, block_volume_performance_class, storage_target,
+       benchmark_rw_mode, io_engine, block_size,
+       sum(case when valid_measurement then 1 else 0 end) as valid_repetitions
+from fio
+group by 1, 2, 3, 4, 5, 6
+order by 1, 2, 3, 4, 5, 6
+")
+kable(dimension_coverage, caption = "Coverage by explicit analysis dimensions")
+```
+
+# Throughput
+
+Throughput is reported as MiB/s using `primary_bw_bytes_per_sec`. The main throughput comparisons fix `block_size = 128k`, `io_engine = io_uring`, and `iodepth = 16`.
+
+## Instance Type Impact
+
+### Block Storage
+
+Filter used: `storage_target = block`, `block_volume_performance_class = storage_premium_perf12`, `io_engine = io_uring`, `block_size = 128k`, `iodepth = 16`. This keeps the block-volume class constant while comparing instance types. The `g2a.30d` run is not present in this plot because the current dataset does not contain comparable `128k/io_uring` measurements for that instance type.
+
+```{r throughput-instance, fig.width=12, fig.height=7}
+throughput_instance <- sql("
+select benchmark_machine_type, benchmark_rw_mode,
+       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+from fio
+where valid_measurement
+  and storage_target = 'block'
+  and block_volume_performance_class = 'storage_premium_perf12'
+  and io_engine = 'io_uring'
+  and block_size = '128k'
+")
+metric_box(
+  throughput_instance,
+  x = "benchmark_machine_type",
+  y = "bw_mib_per_sec",
+  fill = "benchmark_machine_type",
+  title = "Block storage throughput by instance type",
+  ylab = "Throughput (MiB/s)"
+)
+```
+
+### Local Storage
+
+Filter used: `storage_target = local`, `block_volume_performance_class = storage_premium_perf6`, `benchmark_rw_mode = randread`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This is the only local subset that currently compares more than one instance type. The local `g2a.120d` full matrix exists, but `g2a.30d` only has this local benchmark and `g2a.8d` has no local measurements.
+
+```{r throughput-instance-local, fig.width=12, fig.height=5}
+throughput_instance_local <- sql("
+select benchmark_machine_type, benchmark_rw_mode,
+       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+from fio
+where valid_measurement
+  and storage_target = 'local'
+  and block_volume_performance_class = 'storage_premium_perf6'
+  and benchmark_rw_mode = 'randread'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+")
+metric_box(
+  throughput_instance_local,
+  x = "benchmark_machine_type",
+  y = "bw_mib_per_sec",
+  fill = "benchmark_machine_type",
+  title = "Local storage throughput by instance type",
+  ylab = "Throughput (MiB/s)",
+  ncol = 1
+)
+```
+
+## Block Storage Performance Class Impact
+
+Filter used: `benchmark_machine_type = g2a.120d`, `storage_target = block`, `io_engine = io_uring`, `block_size = 128k`, `iodepth = 16`. This isolates the block-volume performance class effect on the largest instance type.
+
+```{r throughput-perf-class, fig.width=12, fig.height=7}
+throughput_perf_class <- sql("
+select block_volume_performance_class, benchmark_rw_mode,
+       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '128k'
+  and block_volume_performance_class is not null
+")
+metric_box(
+  throughput_perf_class,
+  x = "block_volume_performance_class",
+  y = "bw_mib_per_sec",
+  fill = "block_volume_performance_class",
+  title = "Throughput by block storage performance class",
+  ylab = "Throughput (MiB/s)"
+)
+```
+
+## Storage Target Impact
+
+Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `io_engine = io_uring`, `block_size = 128k`, `iodepth = 16`. The highest available performance class is used so the local-vs-block comparison is not dominated by a deliberately low block-volume class.
+
+```{r throughput-target, fig.width=12, fig.height=7}
+throughput_target <- sql("
+select storage_target, benchmark_rw_mode,
+       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target in ('local', 'block')
+  and io_engine = 'io_uring'
+  and block_size = '128k'
+")
+metric_box(
+  throughput_target,
+  x = "storage_target",
+  y = "bw_mib_per_sec",
+  fill = "storage_target",
+  title = "Throughput by storage target",
+  ylab = "Throughput (MiB/s)"
+)
+```
+
+## Block Size Impact
+
+### Block Storage
+
+Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = block`, `io_engine = io_uring`. Block size is the compared dimension and is therefore shown on the x-axis. Note that the `4k` measurements use `iodepth = 32`, while the `128k` measurements use `iodepth = 16`.
+
+```{r throughput-block-size, fig.width=12, fig.height=7}
+throughput_block_size <- sql("
+select block_size, benchmark_rw_mode,
+       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size in ('4k', '128k')
+")
+metric_box(
+  throughput_block_size,
+  x = "block_size",
+  y = "bw_mib_per_sec",
+  fill = "block_size",
+  title = "Throughput by block size",
+  ylab = "Throughput (MiB/s)"
+)
+```
+
+### Local Storage
+
+Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = local`, `io_engine = io_uring`. Block size is the compared dimension and is therefore shown on the x-axis. Note that the `4k` measurements use `iodepth = 32`, while the `128k` measurements use `iodepth = 16`.
+
+```{r throughput-block-size-local, fig.width=12, fig.height=7}
+throughput_block_size_local <- sql("
+select block_size, benchmark_rw_mode,
+       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'local'
+  and io_engine = 'io_uring'
+  and block_size in ('4k', '128k')
+")
+metric_box(
+  throughput_block_size_local,
+  x = "block_size",
+  y = "bw_mib_per_sec",
+  fill = "block_size",
+  title = "Local storage throughput by block size",
+  ylab = "Throughput (MiB/s)"
+)
+```
+
+```{r throughput-summary}
+throughput_summary <- sql("
+select benchmark_machine_type, block_volume_performance_class, storage_target,
+       benchmark_rw_mode, io_engine, block_size, iodepth,
+       round(median(primary_bw_bytes_per_sec) / 1024.0 / 1024.0, 2) as median_mib_per_sec,
+       round(avg(primary_bw_bytes_per_sec) / 1024.0 / 1024.0, 2) as avg_mib_per_sec,
+       count(*) as repetitions
+from fio
+where valid_measurement
+  and block_size = '128k'
+  and io_engine = 'io_uring'
+group by 1, 2, 3, 4, 5, 6, 7
+order by 1, 2, 3, 4, 5, 6, 7
+")
+kable(throughput_summary, caption = "Throughput summary for io_uring 128k measurements")
+```
+
+# IOPS
+
+IOPS is reported using `primary_iops`. The main IOPS comparisons fix `block_size = 4k`; for `io_uring` this means `iodepth = 32`. The `psync/4k` engine comparison uses `iodepth = 1`.
+
+## Instance Type Impact
+
+### Block Storage
+
+Filter used: `storage_target = block`, `block_volume_performance_class = storage_premium_perf12`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. Instance type is shown on the x-axis.
+
+```{r iops-instance, fig.width=12, fig.height=7}
+iops_instance <- sql("
+select benchmark_machine_type, benchmark_rw_mode, primary_iops as iops
+from fio
+where valid_measurement
+  and storage_target = 'block'
+  and block_volume_performance_class = 'storage_premium_perf12'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+")
+metric_box(
+  iops_instance,
+  x = "benchmark_machine_type",
+  y = "iops",
+  fill = "benchmark_machine_type",
+  title = "Block storage IOPS by instance type",
+  ylab = "IOPS"
+)
+```
+
+### Local Storage
+
+Filter used: `storage_target = local`, `block_volume_performance_class = storage_premium_perf6`, `benchmark_rw_mode = randread`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This is the only local subset that currently compares more than one instance type.
+
+```{r iops-instance-local, fig.width=12, fig.height=5}
+iops_instance_local <- sql("
+select benchmark_machine_type, benchmark_rw_mode, primary_iops as iops
+from fio
+where valid_measurement
+  and storage_target = 'local'
+  and block_volume_performance_class = 'storage_premium_perf6'
+  and benchmark_rw_mode = 'randread'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+")
+metric_box(
+  iops_instance_local,
+  x = "benchmark_machine_type",
+  y = "iops",
+  fill = "benchmark_machine_type",
+  title = "Local storage IOPS by instance type",
+  ylab = "IOPS",
+  ncol = 1
+)
+```
+
+## Block Storage Performance Class Impact
+
+Filter used: `benchmark_machine_type = g2a.120d`, `storage_target = block`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`.
+
+```{r iops-perf-class, fig.width=12, fig.height=7}
+iops_perf_class <- sql("
+select block_volume_performance_class, benchmark_rw_mode, primary_iops as iops
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+  and block_volume_performance_class is not null
+")
+metric_box(
+  iops_perf_class,
+  x = "block_volume_performance_class",
+  y = "iops",
+  fill = "block_volume_performance_class",
+  title = "IOPS by block storage performance class",
+  ylab = "IOPS"
+)
+```
+
+## I/O Engine Impact
+
+Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = block`, `block_size = 4k`. I/O engine is the compared dimension and is shown on the x-axis. The `io_uring` measurements use `iodepth = 32`; the `psync` measurements use `iodepth = 1`.
+
+```{r iops-engine, fig.width=12, fig.height=7}
+iops_engine <- sql("
+select io_engine, benchmark_rw_mode, primary_iops as iops
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'block'
+  and block_size = '4k'
+  and io_engine in ('psync', 'io_uring')
+")
+metric_box(
+  iops_engine,
+  x = "io_engine",
+  y = "iops",
+  fill = "io_engine",
+  title = "IOPS by I/O engine",
+  ylab = "IOPS"
+)
+```
+
+## Block Size Impact
+
+### Block Storage
+
+Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = block`, `io_engine = io_uring`. Block size is the compared dimension and is therefore shown on the x-axis. Note that the `4k` measurements use `iodepth = 32`, while the `128k` measurements use `iodepth = 16`.
+
+```{r iops-block-size, fig.width=12, fig.height=7}
+iops_block_size <- sql("
+select block_size, benchmark_rw_mode, primary_iops as iops
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size in ('4k', '128k')
+")
+metric_box(
+  iops_block_size,
+  x = "block_size",
+  y = "iops",
+  fill = "block_size",
+  title = "Block storage IOPS by block size",
+  ylab = "IOPS"
+)
+```
+
+### Local Storage
+
+Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = local`, `io_engine = io_uring`. Block size is the compared dimension and is therefore shown on the x-axis. Note that the `4k` measurements use `iodepth = 32`, while the `128k` measurements use `iodepth = 16`.
+
+```{r iops-block-size-local, fig.width=12, fig.height=7}
+iops_block_size_local <- sql("
+select block_size, benchmark_rw_mode, primary_iops as iops
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'local'
+  and io_engine = 'io_uring'
+  and block_size in ('4k', '128k')
+")
+metric_box(
+  iops_block_size_local,
+  x = "block_size",
+  y = "iops",
+  fill = "block_size",
+  title = "Local storage IOPS by block size",
+  ylab = "IOPS"
+)
+```
+
+## Storage Target Impact
+
+Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`.
+
+```{r iops-target, fig.width=12, fig.height=7}
+iops_target <- sql("
+select storage_target, benchmark_rw_mode, primary_iops as iops
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target in ('local', 'block')
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+")
+metric_box(
+  iops_target,
+  x = "storage_target",
+  y = "iops",
+  fill = "storage_target",
+  title = "IOPS by storage target",
+  ylab = "IOPS"
+)
+```
+
+```{r iops-summary}
+iops_summary <- sql("
+select benchmark_machine_type, block_volume_performance_class, storage_target,
+       benchmark_rw_mode, io_engine, block_size, iodepth,
+       round(median(primary_iops), 2) as median_iops,
+       round(avg(primary_iops), 2) as avg_iops,
+       count(*) as repetitions
+from fio
+where valid_measurement
+  and block_size = '4k'
+group by 1, 2, 3, 4, 5, 6, 7
+order by 1, 2, 3, 4, 5, 6, 7
+")
+kable(iops_summary, caption = "IOPS summary for 4k measurements")
+```
+
+# Latency
+
+Latency is reported in microseconds. Latency plots focus on `block_size = 4k`; for `io_uring` this means `iodepth = 32`. `128k` measurements use `iodepth = 16` and are intentionally excluded from most latency impact plots because they represent a different throughput-oriented workload.
+
+## Latency Metric Overview
+
+Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = block`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This plot shows average, median, and tail latency for the same fixed workload subset.
+
+```{r latency-metric-overview, fig.width=12, fig.height=7}
+latency_metric_overview <- sql("
+select benchmark_rw_mode, 'avg' as latency_metric, primary_clat_mean_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+union all
+select benchmark_rw_mode, 'p50' as latency_metric, primary_clat_p50_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+union all
+select benchmark_rw_mode, 'p99' as latency_metric, primary_clat_p99_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+union all
+select benchmark_rw_mode, 'p99.9' as latency_metric, primary_clat_p999_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+")
+metric_box(
+  latency_metric_overview,
+  x = "latency_metric",
+  y = "latency_us",
+  fill = "latency_metric",
+  title = "Latency distribution by metric",
+  ylab = "Latency (us)"
+)
+```
+
+## Instance Type Impact
+
+### Block Storage
+
+Filter used: `storage_target = block`, `block_volume_performance_class = storage_premium_perf12`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. Instance type is shown on the x-axis.
+
+#### P99
+
+```{r latency-instance, fig.width=12, fig.height=7}
+latency_instance <- sql("
+select benchmark_machine_type, benchmark_rw_mode,
+       primary_clat_p99_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and storage_target = 'block'
+  and block_volume_performance_class = 'storage_premium_perf12'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+")
+metric_box(
+  latency_instance,
+  x = "benchmark_machine_type",
+  y = "latency_us",
+  fill = "benchmark_machine_type",
+  title = "Block storage P99 latency by instance type",
+  ylab = "P99 latency (us)"
+)
+```
+
+#### P50
+
+```{r latency-instance-p50, fig.width=12, fig.height=7}
+latency_instance_p50 <- sql("
+select benchmark_machine_type, benchmark_rw_mode,
+       primary_clat_p50_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and storage_target = 'block'
+  and block_volume_performance_class = 'storage_premium_perf12'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+")
+metric_box(
+  latency_instance_p50,
+  x = "benchmark_machine_type",
+  y = "latency_us",
+  fill = "benchmark_machine_type",
+  title = "Block storage P50 latency by instance type",
+  ylab = "P50 latency (us)"
+)
+```
+
+### Local Storage
+
+Filter used: `storage_target = local`, `block_volume_performance_class = storage_premium_perf6`, `benchmark_rw_mode = randread`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This is the only local subset that currently compares more than one instance type.
+
+#### P99
+
+```{r latency-instance-local, fig.width=12, fig.height=5}
+latency_instance_local <- sql("
+select benchmark_machine_type, benchmark_rw_mode,
+       primary_clat_p99_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and storage_target = 'local'
+  and block_volume_performance_class = 'storage_premium_perf6'
+  and benchmark_rw_mode = 'randread'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+")
+metric_box(
+  latency_instance_local,
+  x = "benchmark_machine_type",
+  y = "latency_us",
+  fill = "benchmark_machine_type",
+  title = "Local storage P99 latency by instance type",
+  ylab = "P99 latency (us)",
+  ncol = 1
+)
+```
+
+#### P50
+
+```{r latency-instance-local-p50, fig.width=12, fig.height=5}
+latency_instance_local_p50 <- sql("
+select benchmark_machine_type, benchmark_rw_mode,
+       primary_clat_p50_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and storage_target = 'local'
+  and block_volume_performance_class = 'storage_premium_perf6'
+  and benchmark_rw_mode = 'randread'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+")
+metric_box(
+  latency_instance_local_p50,
+  x = "benchmark_machine_type",
+  y = "latency_us",
+  fill = "benchmark_machine_type",
+  title = "Local storage P50 latency by instance type",
+  ylab = "P50 latency (us)",
+  ncol = 1
+)
+```
+
+## Block Storage Performance Class Impact
+
+Filter used: `benchmark_machine_type = g2a.120d`, `storage_target = block`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`.
+
+### P99
+
+```{r latency-perf-class, fig.width=12, fig.height=7}
+latency_perf_class <- sql("
+select block_volume_performance_class, benchmark_rw_mode,
+       primary_clat_p99_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+  and block_volume_performance_class is not null
+")
+metric_box(
+  latency_perf_class,
+  x = "block_volume_performance_class",
+  y = "latency_us",
+  fill = "block_volume_performance_class",
+  title = "P99 latency by block storage performance class",
+  ylab = "P99 latency (us)"
+)
+```
+
+### P50
+
+```{r latency-perf-class-p50, fig.width=12, fig.height=7}
+latency_perf_class_p50 <- sql("
+select block_volume_performance_class, benchmark_rw_mode,
+       primary_clat_p50_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+  and block_volume_performance_class is not null
+")
+metric_box(
+  latency_perf_class_p50,
+  x = "block_volume_performance_class",
+  y = "latency_us",
+  fill = "block_volume_performance_class",
+  title = "P50 latency by block storage performance class",
+  ylab = "P50 latency (us)"
+)
+```
+
+## I/O Engine Impact
+
+Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = block`, `block_size = 4k`. The `io_uring` measurements use `iodepth = 32`; the `psync` measurements use `iodepth = 1`.
+
+### P99
+
+```{r latency-engine, fig.width=12, fig.height=7}
+latency_engine <- sql("
+select io_engine, benchmark_rw_mode,
+       primary_clat_p99_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'block'
+  and block_size = '4k'
+  and io_engine in ('psync', 'io_uring')
+")
+metric_box(
+  latency_engine,
+  x = "io_engine",
+  y = "latency_us",
+  fill = "io_engine",
+  title = "P99 latency by I/O engine",
+  ylab = "P99 latency (us)"
+)
+```
+
+### P50
+
+```{r latency-engine-p50, fig.width=12, fig.height=7}
+latency_engine_p50 <- sql("
+select io_engine, benchmark_rw_mode,
+       primary_clat_p50_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'block'
+  and block_size = '4k'
+  and io_engine in ('psync', 'io_uring')
+")
+metric_box(
+  latency_engine_p50,
+  x = "io_engine",
+  y = "latency_us",
+  fill = "io_engine",
+  title = "P50 latency by I/O engine",
+  ylab = "P50 latency (us)"
+)
+```
+
+## Block Size Impact
+
+The rest of the latency section focuses on `4k` because it is the latency-oriented workload. The following plots are included only to make the block-size effect visible; `128k` latency should not be mixed into the other latency comparisons. These block-size plots compare `io_uring/4k/iodepth=32` with `io_uring/128k/iodepth=16`.
+
+### Block Storage
+
+Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = block`, `io_engine = io_uring`. Block size is the compared dimension and is therefore shown on the x-axis. Note that the `4k` measurements use `iodepth = 32`, while the `128k` measurements use `iodepth = 16`.
+
+#### P99
+
+```{r latency-block-size, fig.width=12, fig.height=7}
+latency_block_size <- sql("
+select block_size, benchmark_rw_mode,
+       primary_clat_p99_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size in ('4k', '128k')
+")
+metric_box(
+  latency_block_size,
+  x = "block_size",
+  y = "latency_us",
+  fill = "block_size",
+  title = "Block storage P99 latency by block size",
+  ylab = "P99 latency (us)"
+)
+```
+
+#### P50
+
+```{r latency-block-size-p50, fig.width=12, fig.height=7}
+latency_block_size_p50 <- sql("
+select block_size, benchmark_rw_mode,
+       primary_clat_p50_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'block'
+  and io_engine = 'io_uring'
+  and block_size in ('4k', '128k')
+")
+metric_box(
+  latency_block_size_p50,
+  x = "block_size",
+  y = "latency_us",
+  fill = "block_size",
+  title = "Block storage P50 latency by block size",
+  ylab = "P50 latency (us)"
+)
+```
+
+### Local Storage
+
+Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = local`, `io_engine = io_uring`. Block size is the compared dimension and is therefore shown on the x-axis. Note that the `4k` measurements use `iodepth = 32`, while the `128k` measurements use `iodepth = 16`.
+
+#### P99
+
+```{r latency-block-size-local, fig.width=12, fig.height=7}
+latency_block_size_local <- sql("
+select block_size, benchmark_rw_mode,
+       primary_clat_p99_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'local'
+  and io_engine = 'io_uring'
+  and block_size in ('4k', '128k')
+")
+metric_box(
+  latency_block_size_local,
+  x = "block_size",
+  y = "latency_us",
+  fill = "block_size",
+  title = "Local storage P99 latency by block size",
+  ylab = "P99 latency (us)"
+)
+```
+
+#### P50
+
+```{r latency-block-size-local-p50, fig.width=12, fig.height=7}
+latency_block_size_local_p50 <- sql("
+select block_size, benchmark_rw_mode,
+       primary_clat_p50_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target = 'local'
+  and io_engine = 'io_uring'
+  and block_size in ('4k', '128k')
+")
+metric_box(
+  latency_block_size_local_p50,
+  x = "block_size",
+  y = "latency_us",
+  fill = "block_size",
+  title = "Local storage P50 latency by block size",
+  ylab = "P50 latency (us)"
+)
+```
+
+## Storage Target Impact
+
+Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`.
+
+### P99
+
+```{r latency-target, fig.width=12, fig.height=7}
+latency_target <- sql("
+select storage_target, benchmark_rw_mode,
+       primary_clat_p99_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target in ('local', 'block')
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+")
+metric_box(
+  latency_target,
+  x = "storage_target",
+  y = "latency_us",
+  fill = "storage_target",
+  title = "P99 latency by storage target",
+  ylab = "P99 latency (us)"
+)
+```
+
+### P50
+
+```{r latency-target-p50, fig.width=12, fig.height=7}
+latency_target_p50 <- sql("
+select storage_target, benchmark_rw_mode,
+       primary_clat_p50_ns / 1000.0 as latency_us
+from fio
+where valid_measurement
+  and benchmark_machine_type = 'g2a.120d'
+  and block_volume_performance_class = 'storage_premium_perf29'
+  and storage_target in ('local', 'block')
+  and io_engine = 'io_uring'
+  and block_size = '4k'
+")
+metric_box(
+  latency_target_p50,
+  x = "storage_target",
+  y = "latency_us",
+  fill = "storage_target",
+  title = "P50 latency by storage target",
+  ylab = "P50 latency (us)"
+)
+```
+
+```{r latency-summary}
+latency_summary <- sql("
+select benchmark_machine_type, block_volume_performance_class, storage_target,
+       benchmark_rw_mode, io_engine, block_size, iodepth,
+       round(median(primary_clat_mean_ns) / 1000.0, 2) as median_avg_us,
+       round(median(primary_clat_p50_ns) / 1000.0, 2) as median_p50_us,
+       round(median(primary_clat_p99_ns) / 1000.0, 2) as median_p99_us,
+       round(median(primary_clat_p999_ns) / 1000.0, 2) as median_p999_us,
+       count(*) as repetitions
+from fio
+where valid_measurement
+  and block_size = '4k'
+group by 1, 2, 3, 4, 5, 6, 7
+order by 1, 2, 3, 4, 5, 6, 7
+")
+kable(latency_summary, caption = "Latency summary for 4k measurements")
+```
+
+# OS Tuning Coverage
+
+The current dataset does not contain paired `standard` and `tuned` storage runs, so there is no meaningful OS tuning impact plot yet.
+
+```{r tuning-coverage}
+tuning_coverage <- sql("
+select os_tuning, count(*) as repetitions
+from fio
+where valid_measurement
+group by 1
+order by 1
+")
+kable(tuning_coverage, caption = "OS tuning coverage in valid fio repetitions")
+```
+
+# Diagnostics
+
+```{r failures}
+if (nrow(sql("select * from failures")) == 0) {
+  cat("No failed fio runs were captured.")
+} else {
+  failure_table <- sql("
+  select run_id, scenario_name, benchmark_name, storage_target, repetition, fio_error, failure_reason
+  from failures
+  order by run_id, scenario_name, benchmark_name, storage_target, repetition
+  ")
+  kable(failure_table, caption = "Failed fio repetitions")
+}
+```
+
+```{r local-target-coverage}
+local_summary <- sql("
+select benchmark_machine_type, block_volume_performance_class, storage_target,
+       benchmark_rw_mode, io_engine, block_size,
+       sum(case when valid_measurement then 1 else 0 end) as valid_repetitions,
+       sum(case when not valid_measurement then 1 else 0 end) as invalid_repetitions
+from fio
+where storage_target = 'local'
+group by 1, 2, 3, 4, 5, 6
+order by 1, 2, 3, 4, 5, 6
+")
+if (nrow(local_summary) == 0) {
+  cat("No local-target measurements were parsed.")
+} else {
+  kable(local_summary, caption = "Local-target coverage")
+}
+```
