@@ -72,41 +72,50 @@ box_jitter <- function(df, x, y, fill = NULL, title = NULL, subtitle = NULL, yla
     base_plot_theme()
 }
 
-delta_table <- function(table_name, metric_expr, lower_is_better = FALSE, where_clause = "1 = 1") {
+delta_table <- function(table_name, metric_expr, benchmark_select_expr, benchmark_group_cols, benchmark_output_cols,
+                        lower_is_better = FALSE, where_clause = "1 = 1") {
   direction_expr <- if (lower_is_better) "-1" else "1"
+  group_cols <- paste(c("placement_class", "client_machine_type", "server_machine_type", "protocol", benchmark_group_cols, "os_tuning"), collapse = ", ")
+  join_cols <- c("placement_class", "client_machine_type", "server_machine_type", "protocol", benchmark_group_cols)
+  join_condition <- paste(sprintf("s.%s is not distinct from t.%s", join_cols, join_cols), collapse = "\n        and ")
+  paired_select_cols <- paste(paste0("s.", c("placement_class", "client_machine_type", "protocol", benchmark_output_cols)), collapse = ", ")
+  output_cols <- paste(c("placement_class", "client_machine_type", "protocol", benchmark_output_cols), collapse = ", ")
+  order_cols <- paste(c("placement_class", "client_machine_type", "protocol", benchmark_output_cols), collapse = ", ")
   sql(glue::glue("
     with base as (
-      select placement_class, client_machine_type, server_machine_type, benchmark_name, protocol,
+      select placement_class, client_machine_type, server_machine_type, protocol,
+             {benchmark_select_expr},
              os_tuning, {metric_expr} as metric
       from {table_name}
       where {where_clause}
     ),
     agg as (
-      select placement_class, client_machine_type, server_machine_type, benchmark_name, protocol, os_tuning,
+      select {group_cols},
              median(metric) as median_metric, count(*) as n
       from base
       where metric is not null
-      group by 1, 2, 3, 4, 5, 6
+      group by {group_cols}
     ),
     paired as (
-      select s.placement_class, s.client_machine_type, s.benchmark_name, s.protocol,
+      select {paired_select_cols},
              s.median_metric as standard_median,
              t.median_metric as tuned_median,
              s.n as standard_n,
              t.n as tuned_n,
              ((t.median_metric - s.median_metric) / nullif(s.median_metric, 0)) * 100 as raw_delta_pct
       from agg s
-      join agg t using (placement_class, client_machine_type, server_machine_type, benchmark_name, protocol)
+      join agg t
+        on {join_condition}
       where s.os_tuning = 'standard' and t.os_tuning = 'tuned'
     )
-    select placement_class, client_machine_type, benchmark_name, protocol,
+    select {output_cols},
            round(standard_median, 3) as standard_median,
            round(tuned_median, 3) as tuned_median,
            standard_n, tuned_n,
            round(raw_delta_pct, 2) as delta_pct,
            round(raw_delta_pct * {direction_expr}, 2) as improvement_pct
     from paired
-    order by placement_class, client_machine_type, benchmark_name, protocol
+    order by {order_cols}
   "))
 }
 ```
@@ -133,6 +142,28 @@ if (!is.null(params$note) && nzchar(params$note)) {
 # Data Coverage
 
 The main analysis uses one row per benchmark repetition. iperf3 interval rows are kept for diagnostics only and are not treated as independent benchmark repetitions.
+
+```{r filter-policy, echo=FALSE}
+filter_policy <- data.frame(
+  section = c(
+    "TCP throughput",
+    "UDP throughput",
+    "UDP packet-size impact",
+    "Latency placement impact",
+    "Latency instance impact",
+    "Latency message-size impact"
+  ),
+  default_filter = c(
+    "protocol = tcp; tcp_length_bytes = 131072; stream count and OS tuning are separated by facets where relevant",
+    "protocol = udp; broad comparisons use udp_length_bytes = 1492; UDP target rate and stream count are fixed or shown explicitly",
+    "protocol = udp; client_machine_type = g2a.120d; udp_target_bitrate_gbit_per_sec = 90; packet size is shown on the x-axis",
+    "sockperf; comparable placement pairs only; os_tuning is split into standard/tuned subsections; message sizes are limited to 64 B and 8192 B",
+    "sockperf; placement_class = different-host-single-az; msg_size_bytes = 64; protocol and OS tuning are separated by facets",
+    "sockperf; client_machine_type = g2a.120d; os_tuning = standard; message size is shown on the x-axis"
+  )
+)
+kable(filter_policy, caption = "Default filters used to keep network comparisons comparable")
+```
 
 ```{r coverage-counts}
 kable(counts, caption = "Parsed network benchmark data")
@@ -246,7 +277,7 @@ kable(udp_placement_summary, caption = "UDP throughput, loss, and jitter by plac
 
 ## Instance Type Impact
 
-Instance type comparisons are shown with placement as a facet to avoid mixing unrelated placement classes. Current data primarily supports different-host single-AZ comparisons across `g2a.2d`, `g2a.8d`, and `g2a.120d`.
+Instance type comparisons fix placement to `different-host-single-az` to avoid mixing unrelated placement classes. Current data supports this comparison across `g2a.2d`, `g2a.8d`, and `g2a.120d`.
 
 ```{r tcp-instance-impact, fig.width=13, fig.height=6.5}
 tcp_instance <- sql("
@@ -307,18 +338,24 @@ if (nrow(udp_instance) == 0) {
 
 ## OS Tuning Impact
 
-The OS tuning table pairs standard and tuned measurements only when placement, instance type, benchmark, and protocol match.
+The OS tuning table pairs standard and tuned measurements only when placement, instance type, protocol, and explicit benchmark parameters match.
 
 ```{r throughput-tuning-table}
 throughput_tuning <- delta_table(
   "iperf3",
   "receiver_mbit_per_sec",
+  "parallel_streams,
+   tcp_length_bytes,
+   udp_length_bytes,
+   udp_target_bitrate_gbit_per_sec as udp_target_gbit_per_sec",
+  c("parallel_streams", "tcp_length_bytes", "udp_length_bytes", "udp_target_gbit_per_sec"),
+  c("parallel_streams", "tcp_length_bytes", "udp_length_bytes", "udp_target_gbit_per_sec"),
   lower_is_better = FALSE,
   where_clause = "receiver_mbit_per_sec is not null
                   and ((protocol = 'tcp' and tcp_length_bytes = 131072)
                        or (protocol = 'udp' and udp_length_bytes = 1492))"
 )
-kable(throughput_tuning, caption = "OS tuning impact on iperf3 receiver throughput; broad comparison fixes TCP length to 131072 B and UDP length to 1492 B")
+kable(throughput_tuning, caption = "OS tuning impact on iperf3 receiver throughput; paired by explicit benchmark parameter columns")
 ```
 
 ## Protocol And UDP-Specific Effects
@@ -687,10 +724,13 @@ if (nrow(lat_instance) == 0) {
 latency_tuning <- delta_table(
   "sockperf",
   "p99_rtt_us",
+  "msg_size_bytes",
+  c("msg_size_bytes"),
+  c("msg_size_bytes"),
   lower_is_better = TRUE,
   where_clause = "p99_rtt_us is not null"
 )
-kable(latency_tuning, caption = "OS tuning impact on sockperf p99 latency; positive improvement means tuned is lower")
+kable(latency_tuning, caption = "OS tuning impact on sockperf p99 latency; paired by msg_size_bytes; positive improvement means tuned is lower")
 ```
 
 ## Protocol And Message Size Impact
@@ -763,4 +803,72 @@ if (nrow(interval_diag) == 0) {
     ) +
     base_plot_theme()
 }
+```
+
+# Appendix: OS Tuning Profile
+
+The `tuned` label in this report corresponds to the `network-throughput` profile applied by `/opt/cloud-measuring/bin/apply-os-tuning.sh` on both benchmark nodes. The `standard` profile leaves the OS network settings unchanged.
+
+```{r tuning-appendix, echo=FALSE}
+tuning_parameters <- data.frame(
+  category = c(
+    "Queue discipline and congestion control",
+    "Queue discipline and congestion control",
+    "Socket buffer limits",
+    "Socket buffer limits",
+    "Socket buffer limits",
+    "Socket buffer limits",
+    "UDP buffer minimums",
+    "UDP buffer minimums",
+    "Connection backlog and packet processing",
+    "Connection backlog and packet processing",
+    "Connection backlog and packet processing",
+    "Connection backlog and packet processing",
+    "TCP/IP behavior",
+    "TCP/IP behavior",
+    "TCP/IP behavior",
+    "Interface-local tuning",
+    "Interface-local tuning"
+  ),
+  setting = c(
+    "net.core.default_qdisc",
+    "net.ipv4.tcp_congestion_control",
+    "net.core.rmem_max",
+    "net.core.wmem_max",
+    "net.ipv4.tcp_rmem",
+    "net.ipv4.tcp_wmem",
+    "net.ipv4.udp_rmem_min",
+    "net.ipv4.udp_wmem_min",
+    "net.core.somaxconn",
+    "net.core.netdev_max_backlog",
+    "net.core.netdev_budget",
+    "net.core.optmem_max",
+    "net.ipv4.ip_local_port_range",
+    "net.ipv4.tcp_tw_reuse",
+    "net.ipv4.tcp_frto",
+    "ethtool -G <primary_iface>",
+    "ip link set <primary_iface> txqueuelen"
+  ),
+  tuned_value = c(
+    "fq",
+    "bbr",
+    "134217728",
+    "134217728",
+    "4096 87380 67108864",
+    "4096 65536 67108864",
+    "16384",
+    "16384",
+    "32768",
+    "32768",
+    "1000",
+    "65535",
+    "1024 65535",
+    "1",
+    "0",
+    "rx 1024 tx 1024",
+    "10000"
+  ),
+  stringsAsFactors = FALSE
+)
+kable(tuning_parameters, caption = "Network-throughput OS tuning profile")
 ```
