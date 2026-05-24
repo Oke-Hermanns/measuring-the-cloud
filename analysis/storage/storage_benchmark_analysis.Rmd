@@ -232,7 +232,7 @@ metric_box(
 
 ### Local Storage
 
-Filter used: `storage_target = local`, `block_volume_performance_class = storage_premium_perf6`, `benchmark_rw_mode = randread`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This is the only local subset that currently compares more than one instance type. The local `g2a.120d` full matrix exists, but `g2a.30d` only has this local benchmark and `g2a.8d` has no local measurements.
+Filter used: `storage_target = local`, `block_volume_performance_class = storage_premium_perf6`, `benchmark_rw_mode = randread`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This narrow subset is used because it is currently comparable across more than one local-storage instance type. Other local-storage measurements may exist for individual instance/performance-class combinations, but they are not mixed into this instance-type comparison.
 
 ```{r throughput-instance-local, fig.width=12, fig.height=5}
 throughput_instance_local <- sql("
@@ -462,7 +462,7 @@ metric_box(
 
 ### Local Storage
 
-Filter used: `storage_target = local`, `block_volume_performance_class = storage_premium_perf6`, `benchmark_rw_mode = randread`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This is the only local subset that currently compares more than one instance type.
+Filter used: `storage_target = local`, `block_volume_performance_class = storage_premium_perf6`, `benchmark_rw_mode = randread`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This narrow subset is used because it is currently comparable across more than one local-storage instance type.
 
 ```{r iops-instance-local, fig.width=12, fig.height=5}
 iops_instance_local <- sql("
@@ -787,7 +787,7 @@ metric_box(
 
 ### Local Storage
 
-Filter used: `storage_target = local`, `block_volume_performance_class = storage_premium_perf6`, `benchmark_rw_mode = randread`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This is the only local subset that currently compares more than one instance type.
+Filter used: `storage_target = local`, `block_volume_performance_class = storage_premium_perf6`, `benchmark_rw_mode = randread`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This narrow subset is used because it is currently comparable across more than one local-storage instance type.
 
 #### P99
 

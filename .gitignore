@@ -8,6 +8,11 @@ logs/
 network/scenarios/*.tfvars
 storage/scenarios/*.tfvars
 
+# Generated analysis outputs. Source parsers and report templates are tracked.
+analysis/**/all/
+analysis/**/run-*/
+analysis/**/*.html
+
 *.csv
 *.png
 

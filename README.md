@@ -2,9 +2,8 @@
 
 Lean benchmark framework for comparing cloud network and storage performance.
 
-The current implemented slices are the STACKIT network benchmark path and the
-first STACKIT storage benchmark slice, both using a persistent benchmark
-runner VM for private-IP execution:
+The current implemented slices are STACKIT network and storage benchmarks,
+both using a persistent benchmark runner VM for private-IP execution:
 
 - provision a small runner VM plus shared network/security plumbing with
   OpenTofu
@@ -12,7 +11,7 @@ runner VM for private-IP execution:
 - generate a runner-local SSH key for the scenario VMs
 - run the benchmark suite on the runner over private IPs
 - bootstrap tools through cloud-init
-- run all non-skipped network benchmark files on the scenario pair
+- run all non-skipped benchmark files for the selected scenario(s)
 - fetch raw artifacts back from the runner
 - destroy infrastructure to control cost
 
@@ -20,7 +19,7 @@ The storage slice follows the same runner model but uses one benchmark VM per
 scenario, with `fio` workloads over discovered local and/or attached block
 storage targets.
 
-## Network Quick Start
+## Quick Start
 
 Copy and edit the shared STACKIT runner foundation tfvars:
 
@@ -28,12 +27,20 @@ Copy and edit the shared STACKIT runner foundation tfvars:
 cp infra/stackit-runner/basic-infra.tfvars.example infra/stackit-runner/basic-infra.tfvars
 ```
 
-Then provision the runner and start a benchmark run:
+Then provision the runner and start a benchmark run for one scenario file:
 
 ```bash
 ./scripts/provision_runner.sh \
   --service-account-json /path/to/stackit-service-account.json \
   --scenario network/scenarios/stackit-baseline.sh
+```
+
+Or run a scenario folder:
+
+```bash
+./scripts/provision_runner.sh \
+  --service-account-json /path/to/stackit-service-account.json \
+  --scenario-dir network/scenarios/all
 ```
 
 The helper prints a fetch command for the completed run. Use it to pull the
@@ -63,20 +70,43 @@ artifacts/network/runner-control/<run-id>/
 artifacts/network/<run-id>/<scenario-name>/
 ```
 
-## Contracts
+## Scenario Files
 
-Infrastructure scenarios are shell files, for example
-`network/scenarios/stackit-baseline.sh`. Required variables:
+Scenario files are sourced shell files. They describe one concrete cloud setup
+and point the runner to a benchmark directory. Scenario folders group files by
+intent: some folders run broad matrices, while others contain focused subsets.
+See the README in each scenario folder for the current intent of that folder.
+
+Typical network scenario variables:
 
 ```bash
 SCENARIO_NAME=stackit-baseline
 PROVIDER=stackit
 TOFU_DIR=network/infra/stackit
 TFVARS_FILE=network/scenarios/stackit-baseline.tfvars
-BENCHMARK_DIR=network/benchmarks
+BENCHMARK_DIR=network/benchmarks/baseline
 ```
 
-Benchmark files are shell files in `network/benchmarks/`. Required variables:
+Typical storage scenario variables:
+
+```bash
+SCENARIO_NAME=stackit_g2a.30d_storage_premium_perf6_standard
+PROVIDER=stackit
+TOFU_DIR=storage/infra/stackit
+TFVARS_FILE=storage/scenarios/stackit-baseline.tfvars
+BENCHMARK_DIR=storage/benchmarks/full
+```
+
+The selected scenario file can override cloud dimensions such as instance type,
+availability zone, OS tuning, affinity, root volume size, or attached block
+volume performance class.
+
+Set `SKIP=1` to keep a scenario file in the directory without running it.
+
+## Benchmark Files
+
+Benchmark files are sourced shell files under workload-specific benchmark
+directories. Required variables:
 
 ```bash
 BENCHMARK_NAME=iperf3-tcp-1s
@@ -86,49 +116,9 @@ SKIP=0
 
 Set `SKIP=1` to keep a benchmark file in the directory without running it.
 
-Network scenario files may set:
-
-```bash
-OS_TUNING=standard
-INSTANCE_AFFINITY=none
-```
-
-Supported `OS_TUNING` values are `standard` and `network-throughput`.
-Supported `INSTANCE_AFFINITY` values are `none`, `co-located`, and `different-host`.
-
-The scenario matrix under `network/scenarios/matrix/` encodes:
-
-- affinity: `co-located` or `different-host`
-- zone: `eu01-1` for both client and server
-- instance type: `g2a.2d`, `g2a.8d`, `g2a.120d`
-- OS profile: `standard` or `tuned`
-
-The matrix scenarios are explicit files that source a shared constants file and
-set the scenario-specific values directly. They reuse the baseline tfvars file
-and the runner overlays the scenario-specific values before provisioning.
-
-Cross-AZ cases are deferred for a later scenario family where both client and
-server zones vary together.
-
-The initial real network suite is:
-
-- `sockperf-tcp-64b`
-- `sockperf-udp-64b`
-- `iperf3-tcp-1s`
-- `iperf3-tcp-4s`
-- `iperf3-udp-1g`
-- `iperf3-udp-9g`
-- `iperf3-udp-25g`
-- `iperf3-udp-90g`
-
-The UDP-oriented high-throughput scenario runs:
-
-- `iperf3-udp-mtu-90g-4s`
-
-That benchmark uses MTU-sized UDP payloads and the `network-throughput` OS profile.
-
 Default runtimes and repetitions:
 
 - `sockperf`: 30s runtime, 5 repetitions
 - `iperf3` TCP: 30s runtime, 3 repetitions, default `IPERF3_TCP_LENGTH=128K`
 - `iperf3` UDP: 30s runtime, 3 repetitions
+- `fio`: benchmark-specific runtime, usually 3 repetitions

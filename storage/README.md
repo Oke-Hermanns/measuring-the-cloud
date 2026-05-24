@@ -5,9 +5,9 @@ available storage targets on that VM, runs `fio` benchmark files on the
 discovered targets, fetches the raw artifacts, and then destroys the
 infrastructure according to the selected destroy policy.
 
-The first supported slice is STACKIT plus the shared persistent runner
-foundation in `infra/stackit-runner/`. When the runner is used, the storage
-VM is controlled over private IPs only.
+The current supported cloud path is STACKIT plus the shared persistent runner
+foundation in `infra/stackit-runner/`. When the runner is used, the storage VM
+is controlled over private IPs only.
 
 ## Quick Start
 
@@ -18,11 +18,11 @@ cp storage/scenarios/stackit-baseline.tfvars.example \
   storage/scenarios/stackit-baseline.tfvars
 ```
 
-Run the first scenario locally:
+Run one scenario locally:
 
 ```bash
 ./storage/runner.sh \
-  --scenario storage/scenarios/stackit-g2a30d-block.sh \
+  --scenario storage/scenarios/all/stackit_g2a.30d_storage_premium_perf6_standard.sh \
   --destroy always
 ```
 
@@ -32,12 +32,13 @@ Run it through the shared runner:
 ./scripts/provision_runner.sh \
   --service-account-json /path/to/stackit-service-account.json \
   --workload storage \
-  --scenario storage/scenarios/stackit-g2a30d-block.sh
+  --scenario-dir storage/scenarios/all
 ```
 
-The storage matrix lives under `storage/scenarios/all/` and covers the
-instance/performance-class combinations for `g2a.8d`, `g2a.30d`, and
-`g2a.120d`.
+Scenario folders under `storage/scenarios/` group explicit scenario files by
+intent. Some folders run broad matrices, while others contain focused subsets
+such as block-only or local-only storage. See each folder's README for the
+current scope of that folder.
 
 The default benchmark suite is:
 
@@ -63,7 +64,7 @@ fallback if metadata is incomplete.
 Storage scenarios are shell files and may define:
 
 ```bash
-SCENARIO_NAME=stackit-g2a30d-block-standard
+SCENARIO_NAME=stackit_g2a.30d_storage_premium_perf6_standard
 PROVIDER=stackit
 TOFU_DIR=storage/infra/stackit
 TFVARS_FILE=storage/scenarios/stackit-baseline.tfvars
@@ -77,6 +78,8 @@ SKIP=0
 ```
 
 `SKIP=1` skips a whole scenario during discovery and dry-run reporting.
+`BLOCK_VOLUME_SIZE_GIB=0` disables the additional benchmark block volume; the
+root volume is still provisioned as the VM boot disk.
 
 ## Benchmark Contract
 

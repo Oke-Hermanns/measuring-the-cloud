@@ -18,9 +18,10 @@ onto that VM and then executed over private IPs only.
   --destroy always
 ```
 
-The baseline scenario is `stackit-baseline`. The matrix scenarios live under
-`network/scenarios/matrix/` and are discovered recursively by
-`--scenario-dir`.
+The baseline scenario is `stackit-baseline`. Scenario folders under
+`network/scenarios/` group explicit scenario files by intent and are discovered
+recursively by `--scenario-dir`. See each folder's README for the current
+scope of that folder.
 
 Useful options:
 
@@ -47,7 +48,7 @@ Then provision the runner and launch the benchmark suite on it:
 ```bash
 ./scripts/provision_runner.sh \
   --service-account-json /path/to/stackit-service-account.json \
-  --scenario-dir network/scenarios/matrix
+  --scenario-dir network/scenarios/all
 ```
 
 The helper stages only the required repository assets to the runner via
@@ -84,16 +85,16 @@ SCENARIO_NAME=stackit-baseline
 PROVIDER=stackit
 TOFU_DIR=network/infra/stackit
 TFVARS_FILE=network/scenarios/stackit-baseline.tfvars
-BENCHMARK_DIR=network/benchmarks
+BENCHMARK_DIR=network/benchmarks/full
 PLACEMENT_MODE=single-az
 OS_TUNING=standard
 INSTANCE_AFFINITY=different-host
 SKIP=0
 ```
 
-The concrete cloud setup lives in the referenced tfvars file. For STACKIT,
-the first supported knobs are client/server machine types and client/server
-availability zones.
+The concrete cloud setup starts from the referenced tfvars file. The runner
+overlays scenario-specific values before provisioning, such as client/server
+machine types, availability zones, instance affinity, and OS tuning.
 
 Supported OS tuning profiles:
 

@@ -34,7 +34,6 @@
           RColorBrewer
           shades
           duckdb
-          rmarkdown
           readr
           DBI
           rmarkdown
