@@ -1,4 +1,4 @@
-SCENARIO_NAME=stackit-g2a30d-block-standard
+SCENARIO_NAME=stackit-g2a8d-block-standard
 PROVIDER=stackit
 TOFU_DIR=storage/infra/stackit
 TFVARS_FILE=storage/scenarios/stackit-baseline.tfvars
