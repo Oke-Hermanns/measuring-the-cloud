@@ -3,6 +3,7 @@ title: "Storage Benchmark Analysis"
 params:
   result_id: "all"
   note: null
+  config_file: null
 output:
   html_document:
     toc: true
@@ -48,11 +49,150 @@ DBI::dbExecute(con, sprintf("create table benchmarks as select * from read_csv_a
 DBI::dbExecute(con, sprintf("create table fio as select * from read_csv_auto('%s')", csv_sql_path("storage_fio.csv")))
 DBI::dbExecute(con, sprintf("create table failures as select * from read_csv_auto('%s')", csv_sql_path("storage_failures.csv")))
 
-machine_levels <- c("g2a.8d", "g2a.30d", "g2a.120d")
-workload_levels <- c("randread", "randwrite", "read", "write")
-engine_levels <- c("psync", "io_uring")
-block_size_levels <- c("4k", "128k")
-target_levels <- c("local", "block")
+default_report_config <- list(
+  reference_machine_type = "g2a.120d",
+  instance_comparison_block_performance_class = "storage_premium_perf12",
+  local_instance_comparison_block_performance_class = "storage_premium_perf6",
+  reference_block_performance_class = "storage_premium_perf29",
+  local_instance_rw_mode = "randread",
+  default_io_engine = "io_uring",
+  throughput_block_size = "128k",
+  throughput_iodepth = 16,
+  iops_latency_block_size = "4k",
+  iops_latency_iodepth = 32,
+  default_numjobs = 1,
+  psync_iodepth = 1,
+  psync_numjobs = 1,
+  block_size_comparison = data.frame(
+    block_size = c("4k", "128k"),
+    iodepth = c(32, 16),
+    stringsAsFactors = FALSE
+  ),
+  performance_class_machine_types = c("g2a.8d", "g2a.30d", "g2a.120d"),
+  preferred_machine_order = c("g2a.8d", "g2a.30d", "g2a.120d"),
+  preferred_workload_order = c("randread", "randwrite", "read", "write"),
+  preferred_engine_order = c("psync", "io_uring"),
+  preferred_target_order = c("local", "block")
+)
+
+configured_keys <- character(0)
+report_config <- default_report_config
+if (!is.null(params$config_file) && nzchar(params$config_file)) {
+  config_override <- jsonlite::fromJSON(params$config_file, simplifyDataFrame = TRUE)
+  unknown_keys <- setdiff(names(config_override), names(default_report_config))
+  if (length(unknown_keys) > 0) {
+    stop(sprintf("Unknown storage report config keys: %s", paste(unknown_keys, collapse = ", ")))
+  }
+  configured_keys <- names(config_override)
+  report_config[names(config_override)] <- config_override
+}
+
+discover_single <- function(column, current) {
+  if (column %in% configured_keys) return(current)
+  values <- sql(sprintf(
+    "select distinct %s as value from fio where valid_measurement and %s is not null order by 1",
+    column, column
+  ))$value
+  if (length(values) == 1) values[[1]] else current
+}
+
+report_config$reference_machine_type <- discover_single(
+  "benchmark_machine_type", report_config$reference_machine_type
+)
+report_config$instance_comparison_block_performance_class <- discover_single(
+  "block_volume_performance_class", report_config$instance_comparison_block_performance_class
+)
+report_config$local_instance_comparison_block_performance_class <- discover_single(
+  "block_volume_performance_class", report_config$local_instance_comparison_block_performance_class
+)
+report_config$reference_block_performance_class <- discover_single(
+  "block_volume_performance_class", report_config$reference_block_performance_class
+)
+report_config$local_instance_rw_mode <- discover_single(
+  "benchmark_rw_mode", report_config$local_instance_rw_mode
+)
+report_config$throughput_block_size <- discover_single("block_size", report_config$throughput_block_size)
+report_config$iops_latency_block_size <- discover_single("block_size", report_config$iops_latency_block_size)
+
+discover_iodepth <- function(config_key, block_size) {
+  if (config_key %in% configured_keys) return(report_config[[config_key]])
+  values <- sql(sprintf(
+    paste(
+      "select distinct iodepth from fio",
+      "where valid_measurement",
+      "  and io_engine = %s",
+      "  and block_size = %s",
+      "order by 1"
+    ),
+    as.character(DBI::dbQuoteString(con, report_config$default_io_engine)),
+    as.character(DBI::dbQuoteString(con, block_size))
+  ))$iodepth
+  if (length(values) == 1) values[[1]] else report_config[[config_key]]
+}
+
+report_config$throughput_iodepth <- discover_iodepth(
+  "throughput_iodepth", report_config$throughput_block_size
+)
+report_config$iops_latency_iodepth <- discover_iodepth(
+  "iops_latency_iodepth", report_config$iops_latency_block_size
+)
+
+if (!("block_size_comparison" %in% configured_keys)) {
+  available_block_sizes <- sql("
+  select distinct block_size, block_size_bytes, iodepth, io_engine
+  from fio
+  where valid_measurement
+  order by block_size_bytes, iodepth
+  ")
+  available_block_sizes <- available_block_sizes[
+    available_block_sizes$io_engine == report_config$default_io_engine,
+    c("block_size", "iodepth"),
+    drop = FALSE
+  ]
+  if (nrow(available_block_sizes) > 0) report_config$block_size_comparison <- unique(available_block_sizes)
+}
+if (!("performance_class_machine_types" %in% configured_keys)) {
+  available_machine_types <- sql("
+  select distinct benchmark_machine_type
+  from fio
+  where valid_measurement and benchmark_machine_type is not null
+  order by 1
+  ")$benchmark_machine_type
+  report_config$performance_class_machine_types <- unique(c(
+    report_config$preferred_machine_order[
+      report_config$preferred_machine_order %in% available_machine_types
+    ],
+    available_machine_types
+  ))
+}
+
+scalar_config <- report_config[!vapply(report_config, is.list, logical(1))]
+scalar_config <- scalar_config[!vapply(scalar_config, function(x) length(x) > 1, logical(1))]
+DBI::dbWriteTable(con, "report_config", as.data.frame(scalar_config, stringsAsFactors = FALSE), overwrite = TRUE)
+DBI::dbWriteTable(con, "report_block_size_comparison", report_config$block_size_comparison, overwrite = TRUE)
+
+append_discovered <- function(preferred, discovered) unique(c(preferred, discovered))
+machine_levels <- append_discovered(
+  report_config$preferred_machine_order,
+  sql("select distinct benchmark_machine_type from fio order by 1")$benchmark_machine_type
+)
+workload_levels <- append_discovered(
+  report_config$preferred_workload_order,
+  sql("select distinct benchmark_rw_mode from fio order by 1")$benchmark_rw_mode
+)
+engine_levels <- append_discovered(
+  report_config$preferred_engine_order,
+  sql("select distinct io_engine from fio order by 1")$io_engine
+)
+block_size_levels <- sql("select distinct block_size, block_size_bytes from fio order by block_size_bytes")$block_size
+target_levels <- append_discovered(
+  report_config$preferred_target_order,
+  sql("select distinct storage_target from fio order by 1")$storage_target
+)
+performance_class_machine_label <- function(position) {
+  machines <- report_config$performance_class_machine_types
+  if (length(machines) < position) sprintf("machine slot %d (not configured)", position) else machines[[position]]
+}
 perf_class_order <- sql("
 select distinct block_volume_performance_class
 from scenarios
@@ -87,6 +227,9 @@ apply_factor_levels <- function(df) {
   }
   if ("latency_metric" %in% names(df)) {
     df$latency_metric <- factor(df$latency_metric, levels = c("avg", "p50", "p99", "p99.9"))
+  }
+  if ("execution_config" %in% names(df)) {
+    df$execution_config <- factor(df$execution_config, levels = unique(df$execution_config))
   }
   df
 }
@@ -128,6 +271,37 @@ metric_summary <- function(df, group_cols, metric_col) {
   )
 }
 
+render_performance_class_plots <- function(metric_expression, ylab, title_suffix,
+                                           block_size_setting, iodepth_setting,
+                                           heading_level = 3) {
+  for (machine_type in report_config$performance_class_machine_types) {
+    cat(sprintf("%s %s\n\n", paste(rep("#", heading_level), collapse = ""), machine_type))
+    machine_literal <- as.character(DBI::dbQuoteString(con, machine_type))
+    df <- sql(glue::glue("
+    select block_volume_performance_class, benchmark_rw_mode,
+           {metric_expression} as metric_value
+    from fio
+    where valid_measurement
+      and benchmark_machine_type = {machine_literal}
+      and storage_target = 'block'
+      and io_engine = (select default_io_engine from report_config)
+      and block_size = (select {block_size_setting} from report_config)
+      and iodepth = (select {iodepth_setting} from report_config)
+      and numjobs = (select default_numjobs from report_config)
+      and block_volume_performance_class is not null
+    "))
+    print(metric_box(
+      df,
+      x = "block_volume_performance_class",
+      y = "metric_value",
+      fill = "block_volume_performance_class",
+      title = sprintf("%s block storage %s by performance class", machine_type, title_suffix),
+      ylab = ylab
+    ))
+    cat("\n\n")
+  }
+}
+
 validate_rows <- sql("
 select
   count(*) as fio_rows,
@@ -136,6 +310,51 @@ select
   count(distinct run_id) as runs
 from fio
 ")
+
+block_size_comparison_text <- paste(
+  sprintf(
+    "%s uses iodepth = %s",
+    report_config$block_size_comparison$block_size,
+    report_config$block_size_comparison$iodepth
+  ),
+  collapse = "; "
+)
+
+resolved_config <- data.frame(
+  setting = c(
+    "reference_machine_type",
+    "instance_comparison_block_performance_class",
+    "local_instance_comparison_block_performance_class",
+    "reference_block_performance_class",
+    "local_instance_rw_mode",
+    "default_io_engine",
+    "throughput_block_size",
+    "throughput_iodepth",
+    "iops_latency_block_size",
+    "iops_latency_iodepth",
+    "default_numjobs",
+    "psync_iodepth",
+    "psync_numjobs",
+    "block_size_comparison"
+  ),
+  value = c(
+    report_config$reference_machine_type,
+    report_config$instance_comparison_block_performance_class,
+    report_config$local_instance_comparison_block_performance_class,
+    report_config$reference_block_performance_class,
+    report_config$local_instance_rw_mode,
+    report_config$default_io_engine,
+    report_config$throughput_block_size,
+    report_config$throughput_iodepth,
+    report_config$iops_latency_block_size,
+    report_config$iops_latency_iodepth,
+    report_config$default_numjobs,
+    report_config$psync_iodepth,
+    report_config$psync_numjobs,
+    block_size_comparison_text
+  ),
+  stringsAsFactors = FALSE
+)
 ```
 
 This report analyzes storage benchmark results from `r result_id`.
@@ -150,7 +369,7 @@ if (!is.null(params$note) && nzchar(params$note)) {
 
 The report intentionally avoids using `benchmark_name` as a plot facet for impact analysis. The benchmark name is a derived label that includes dimensions such as block size and I/O engine. The plots below compare one dimension at a time while fixing the other relevant dimensions in SQL.
 
-Throughput plots focus on `128k`, `io_uring`, and `iodepth = 16` unless the plot explicitly compares block size. IOPS and latency plots focus on `4k`, `io_uring`, and `iodepth = 32` unless the plot explicitly compares I/O engine. The `psync/4k` measurements use `iodepth = 1`. This avoids mixing the latency-oriented `psync_4k` workloads into throughput comparisons and avoids mixing `128k` workloads into latency comparisons.
+The renderer resolves its comparison constants before executing the plot queries. A passed JSON file overrides defaults. If a zoom-in dimension has exactly one available value, that value is selected automatically. The resolved values are shown below. Fixed comparisons filter `io_engine`, `block_size`, `iodepth`, and `numjobs` explicitly. Execution-configuration plots show the available combinations of `io_engine`, `iodepth`, and `numjobs`. Block-size comparisons apply the configured block-size-to-`iodepth` mapping.
 
 ```{r coverage-counts}
 coverage_counts <- sql("
@@ -168,13 +387,30 @@ kable(coverage_counts, caption = "Parsed storage benchmark data")
 filter_policy <- data.frame(
   section = c("Throughput", "Throughput block-size impact", "IOPS", "Latency"),
   default_filter = c(
-    "block_size = 128k, io_engine = io_uring, iodepth = 16, psync omitted",
-    "io_engine = io_uring, compares block_size on x-axis; 4k uses iodepth = 32 and 128k uses iodepth = 16",
-    "block_size = 4k, io_engine fixed unless comparing I/O engine; io_uring uses iodepth = 32 and psync uses iodepth = 1",
-    "block_size = 4k, io_uring uses iodepth = 32, 128k omitted except diagnostic block-size plots"
+    sprintf(
+      "block_size = %s, io_engine = %s, iodepth = %s, numjobs = %s",
+      report_config$throughput_block_size, report_config$default_io_engine,
+      report_config$throughput_iodepth, report_config$default_numjobs
+    ),
+    sprintf("io_engine = %s, numjobs = %s; %s", report_config$default_io_engine, report_config$default_numjobs, block_size_comparison_text),
+    sprintf(
+      "block_size = %s; %s uses iodepth = %s and numjobs = %s; psync uses iodepth = %s and numjobs = %s",
+      report_config$iops_latency_block_size, report_config$default_io_engine,
+      report_config$iops_latency_iodepth, report_config$default_numjobs,
+      report_config$psync_iodepth, report_config$psync_numjobs
+    ),
+    sprintf(
+      "block_size = %s, io_engine = %s, iodepth = %s, numjobs = %s",
+      report_config$iops_latency_block_size, report_config$default_io_engine,
+      report_config$iops_latency_iodepth, report_config$default_numjobs
+    )
   )
 )
 kable(filter_policy, caption = "Default filtering policy")
+```
+
+```{r resolved-config, echo=FALSE}
+kable(resolved_config, caption = "Resolved report configuration")
 ```
 
 ```{r scenario-table}
@@ -190,24 +426,25 @@ kable(scenario_table, caption = "Scenario coverage")
 ```{r dimension-coverage}
 dimension_coverage <- sql("
 select benchmark_machine_type, block_volume_performance_class, storage_target,
-       benchmark_rw_mode, io_engine, block_size,
+       benchmark_rw_mode, io_engine, block_size, iodepth, numjobs,
+       iodepth * numjobs as effective_concurrency,
        sum(case when valid_measurement then 1 else 0 end) as valid_repetitions
 from fio
-group by 1, 2, 3, 4, 5, 6
-order by 1, 2, 3, 4, 5, 6
+group by 1, 2, 3, 4, 5, 6, 7, 8, 9
+order by 1, 2, 3, 4, 5, 6, 7, 8, 9
 ")
 kable(dimension_coverage, caption = "Coverage by explicit analysis dimensions")
 ```
 
 # Throughput
 
-Throughput is reported as MiB/s using `primary_bw_bytes_per_sec`. The main throughput comparisons fix `block_size = 128k`, `io_engine = io_uring`, and `iodepth = 16`.
+Throughput is reported as MiB/s using `primary_bw_bytes_per_sec`. Main comparisons use the resolved throughput subset shown in the configuration table.
 
 ## Instance Type Impact
 
 ### Block Storage
 
-Filter used: `storage_target = block`, `block_volume_performance_class = storage_premium_perf12`, `io_engine = io_uring`, `block_size = 128k`, `iodepth = 16`. This keeps the block-volume class constant while comparing instance types. The `g2a.30d` run is not present in this plot because the current dataset does not contain comparable `128k/io_uring` measurements for that instance type.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 ```{r throughput-instance, fig.width=12, fig.height=7}
 throughput_instance <- sql("
@@ -216,9 +453,11 @@ select benchmark_machine_type, benchmark_rw_mode,
 from fio
 where valid_measurement
   and storage_target = 'block'
-  and block_volume_performance_class = 'storage_premium_perf12'
-  and io_engine = 'io_uring'
-  and block_size = '128k'
+  and block_volume_performance_class = (select instance_comparison_block_performance_class from report_config)
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select throughput_block_size from report_config)
+  and iodepth = (select throughput_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
   throughput_instance,
@@ -232,7 +471,7 @@ metric_box(
 
 ### Local Storage
 
-Filter used: `storage_target = local`, `block_volume_performance_class = storage_premium_perf6`, `benchmark_rw_mode = randread`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This narrow subset is used because it is currently comparable across more than one local-storage instance type. Other local-storage measurements may exist for individual instance/performance-class combinations, but they are not mixed into this instance-type comparison.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 ```{r throughput-instance-local, fig.width=12, fig.height=5}
 throughput_instance_local <- sql("
@@ -241,10 +480,12 @@ select benchmark_machine_type, benchmark_rw_mode,
 from fio
 where valid_measurement
   and storage_target = 'local'
-  and block_volume_performance_class = 'storage_premium_perf6'
-  and benchmark_rw_mode = 'randread'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and block_volume_performance_class = (select local_instance_comparison_block_performance_class from report_config)
+  and benchmark_rw_mode = (select local_instance_rw_mode from report_config)
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
   throughput_instance_local,
@@ -259,83 +500,21 @@ metric_box(
 
 ## Block Storage Performance Class Impact
 
-Filter used: `storage_target = block`, `io_engine = io_uring`, `block_size = 128k`, `iodepth = 16`. The comparison is split by instance type because available performance classes differ by instance. Subsections with only one performance class are kept so newly added measurements appear without changing the report structure.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
-### g2a.8d
-
-```{r throughput-perf-class-8d, fig.width=12, fig.height=7}
-throughput_perf_class_8d <- sql("
-select block_volume_performance_class, benchmark_rw_mode,
-       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
-from fio
-where valid_measurement
-  and benchmark_machine_type = 'g2a.8d'
-  and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '128k'
-  and block_volume_performance_class is not null
-")
-metric_box(
-  throughput_perf_class_8d,
-  x = "block_volume_performance_class",
-  y = "bw_mib_per_sec",
-  fill = "block_volume_performance_class",
-  title = "g2a.8d block storage throughput by performance class",
-  ylab = "Throughput (MiB/s)"
-)
-```
-
-### g2a.30d
-
-```{r throughput-perf-class-30d, fig.width=12, fig.height=7}
-throughput_perf_class_30d <- sql("
-select block_volume_performance_class, benchmark_rw_mode,
-       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
-from fio
-where valid_measurement
-  and benchmark_machine_type = 'g2a.30d'
-  and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '128k'
-  and block_volume_performance_class is not null
-")
-metric_box(
-  throughput_perf_class_30d,
-  x = "block_volume_performance_class",
-  y = "bw_mib_per_sec",
-  fill = "block_volume_performance_class",
-  title = "g2a.30d block storage throughput by performance class",
-  ylab = "Throughput (MiB/s)"
-)
-```
-
-### g2a.120d
-
-```{r throughput-perf-class-120d, fig.width=12, fig.height=7}
-throughput_perf_class_120d <- sql("
-select block_volume_performance_class, benchmark_rw_mode,
-       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
-from fio
-where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '128k'
-  and block_volume_performance_class is not null
-")
-metric_box(
-  throughput_perf_class_120d,
-  x = "block_volume_performance_class",
-  y = "bw_mib_per_sec",
-  fill = "block_volume_performance_class",
-  title = "g2a.120d block storage throughput by performance class",
-  ylab = "Throughput (MiB/s)"
+```{r throughput-perf-class, results='asis', fig.width=12, fig.height=7}
+render_performance_class_plots(
+  "primary_bw_bytes_per_sec / 1024.0 / 1024.0",
+  "Throughput (MiB/s)",
+  "throughput",
+  "throughput_block_size",
+  "throughput_iodepth"
 )
 ```
 
 ## Storage Target Impact
 
-Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `io_engine = io_uring`, `block_size = 128k`, `iodepth = 16`. The highest available performance class is used so the local-vs-block comparison is not dominated by a deliberately low block-volume class.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 ```{r throughput-target, fig.width=12, fig.height=7}
 throughput_target <- sql("
@@ -343,11 +522,13 @@ select storage_target, benchmark_rw_mode,
        primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target in ('local', 'block')
-  and io_engine = 'io_uring'
-  and block_size = '128k'
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select throughput_block_size from report_config)
+  and iodepth = (select throughput_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
   throughput_target,
@@ -359,11 +540,94 @@ metric_box(
 )
 ```
 
+## Execution Configuration Impact
+
+The execution configuration combines `io_engine`, `iodepth`, and `numjobs`. This makes concurrency differences explicit instead of attributing them to the I/O engine alone.
+
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
+
+```{r throughput-execution-config, fig.width=12, fig.height=7}
+throughput_execution_config <- sql("
+select concat(io_engine, ' / q', cast(iodepth as varchar), ' / jobs=', cast(numjobs as varchar)) as execution_config,
+       benchmark_rw_mode,
+       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+from fio
+where valid_measurement
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
+  and storage_target = 'block'
+  and block_size = (select throughput_block_size from report_config)
+order by case when io_engine = 'io_uring' then 1 else 2 end, iodepth, numjobs
+")
+metric_box(
+  throughput_execution_config,
+  x = "execution_config",
+  y = "bw_mib_per_sec",
+  fill = "execution_config",
+  title = "Throughput by execution configuration",
+  ylab = "Throughput (MiB/s)"
+)
+```
+
+### io_uring Queue Depth
+
+This diagnostic fixes `io_engine` and `numjobs`, then compares `iodepth`.
+
+```{r throughput-iouring-iodepth, fig.width=12, fig.height=7}
+throughput_iouring_iodepth <- sql("
+select concat('q', cast(iodepth as varchar)) as iodepth_config, benchmark_rw_mode,
+       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+from fio
+where valid_measurement
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
+  and storage_target = 'block'
+  and block_size = (select throughput_block_size from report_config)
+  and io_engine = (select default_io_engine from report_config)
+  and numjobs = (select default_numjobs from report_config)
+")
+metric_box(
+  throughput_iouring_iodepth,
+  x = "iodepth_config",
+  y = "bw_mib_per_sec",
+  fill = "iodepth_config",
+  title = "io_uring throughput by queue depth",
+  ylab = "Throughput (MiB/s)"
+)
+```
+
+### psync Worker Count
+
+This diagnostic fixes `io_engine = psync` and `iodepth`, then compares `numjobs`.
+
+```{r throughput-psync-numjobs, fig.width=12, fig.height=7}
+throughput_psync_numjobs <- sql("
+select concat('jobs=', cast(numjobs as varchar)) as numjobs_config, benchmark_rw_mode,
+       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+from fio
+where valid_measurement
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
+  and storage_target = 'block'
+  and block_size = (select throughput_block_size from report_config)
+  and io_engine = 'psync'
+  and iodepth = (select psync_iodepth from report_config)
+")
+metric_box(
+  throughput_psync_numjobs,
+  x = "numjobs_config",
+  y = "bw_mib_per_sec",
+  fill = "numjobs_config",
+  title = "psync throughput by worker count",
+  ylab = "Throughput (MiB/s)"
+)
+```
+
 ## Block Size Impact
 
 ### Block Storage
 
-Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = block`, `io_engine = io_uring`. Block size is the compared dimension and is therefore shown on the x-axis. Note that the `4k` measurements use `iodepth = 32`, while the `128k` measurements use `iodepth = 16`.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 ```{r throughput-block-size, fig.width=12, fig.height=7}
 throughput_block_size <- sql("
@@ -371,11 +635,16 @@ select block_size, benchmark_rw_mode,
        primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size in ('4k', '128k')
+  and io_engine = (select default_io_engine from report_config)
+  and numjobs = (select default_numjobs from report_config)
+  and exists (
+    select 1 from report_block_size_comparison comparison
+    where comparison.block_size = fio.block_size
+      and comparison.iodepth = fio.iodepth
+  )
 ")
 metric_box(
   throughput_block_size,
@@ -389,7 +658,7 @@ metric_box(
 
 ### Local Storage
 
-Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = local`, `io_engine = io_uring`. Block size is the compared dimension and is therefore shown on the x-axis. Note that the `4k` measurements use `iodepth = 32`, while the `128k` measurements use `iodepth = 16`.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 ```{r throughput-block-size-local, fig.width=12, fig.height=7}
 throughput_block_size_local <- sql("
@@ -397,11 +666,16 @@ select block_size, benchmark_rw_mode,
        primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'local'
-  and io_engine = 'io_uring'
-  and block_size in ('4k', '128k')
+  and io_engine = (select default_io_engine from report_config)
+  and numjobs = (select default_numjobs from report_config)
+  and exists (
+    select 1 from report_block_size_comparison comparison
+    where comparison.block_size = fio.block_size
+      and comparison.iodepth = fio.iodepth
+  )
 ")
 metric_box(
   throughput_block_size_local,
@@ -416,29 +690,32 @@ metric_box(
 ```{r throughput-summary}
 throughput_summary <- sql("
 select benchmark_machine_type, block_volume_performance_class, storage_target,
-       benchmark_rw_mode, io_engine, block_size, iodepth,
+       benchmark_rw_mode, io_engine, block_size, iodepth, numjobs,
+       iodepth * numjobs as effective_concurrency,
        round(median(primary_bw_bytes_per_sec) / 1024.0 / 1024.0, 2) as median_mib_per_sec,
        round(avg(primary_bw_bytes_per_sec) / 1024.0 / 1024.0, 2) as avg_mib_per_sec,
        count(*) as repetitions
 from fio
 where valid_measurement
-  and block_size = '128k'
-  and io_engine = 'io_uring'
-group by 1, 2, 3, 4, 5, 6, 7
-order by 1, 2, 3, 4, 5, 6, 7
+  and block_size = (select throughput_block_size from report_config)
+  and io_engine = (select default_io_engine from report_config)
+  and iodepth = (select throughput_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
+group by 1, 2, 3, 4, 5, 6, 7, 8, 9
+order by 1, 2, 3, 4, 5, 6, 7, 8, 9
 ")
-kable(throughput_summary, caption = "Throughput summary for io_uring 128k measurements")
+kable(throughput_summary, caption = sprintf("Throughput summary for %s %s measurements", report_config$default_io_engine, report_config$throughput_block_size))
 ```
 
 # IOPS
 
-IOPS is reported using `primary_iops`. The main IOPS comparisons fix `block_size = 4k`; for `io_uring` this means `iodepth = 32`. The `psync/4k` engine comparison uses `iodepth = 1`.
+IOPS is reported using `primary_iops`. Main comparisons use the resolved IOPS subset shown in the configuration table. Execution-configuration plots show the available engine, queue-depth, and worker-count combinations.
 
 ## Instance Type Impact
 
 ### Block Storage
 
-Filter used: `storage_target = block`, `block_volume_performance_class = storage_premium_perf12`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. Instance type is shown on the x-axis.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 ```{r iops-instance, fig.width=12, fig.height=7}
 iops_instance <- sql("
@@ -446,9 +723,11 @@ select benchmark_machine_type, benchmark_rw_mode, primary_iops as iops
 from fio
 where valid_measurement
   and storage_target = 'block'
-  and block_volume_performance_class = 'storage_premium_perf12'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and block_volume_performance_class = (select instance_comparison_block_performance_class from report_config)
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
   iops_instance,
@@ -462,7 +741,7 @@ metric_box(
 
 ### Local Storage
 
-Filter used: `storage_target = local`, `block_volume_performance_class = storage_premium_perf6`, `benchmark_rw_mode = randread`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This narrow subset is used because it is currently comparable across more than one local-storage instance type.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 ```{r iops-instance-local, fig.width=12, fig.height=5}
 iops_instance_local <- sql("
@@ -470,10 +749,12 @@ select benchmark_machine_type, benchmark_rw_mode, primary_iops as iops
 from fio
 where valid_measurement
   and storage_target = 'local'
-  and block_volume_performance_class = 'storage_premium_perf6'
-  and benchmark_rw_mode = 'randread'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and block_volume_performance_class = (select local_instance_comparison_block_performance_class from report_config)
+  and benchmark_rw_mode = (select local_instance_rw_mode from report_config)
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
   iops_instance_local,
@@ -488,98 +769,94 @@ metric_box(
 
 ## Block Storage Performance Class Impact
 
-Filter used: `storage_target = block`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. The comparison is split by instance type because available performance classes differ by instance. Subsections with only one performance class are kept so newly added measurements appear without changing the report structure.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
-### g2a.8d
+```{r iops-perf-class, results='asis', fig.width=12, fig.height=7}
+render_performance_class_plots(
+  "primary_iops",
+  "IOPS",
+  "IOPS",
+  "iops_latency_block_size",
+  "iops_latency_iodepth"
+)
+```
 
-```{r iops-perf-class-8d, fig.width=12, fig.height=7}
-iops_perf_class_8d <- sql("
-select block_volume_performance_class, benchmark_rw_mode, primary_iops as iops
+## Execution Configuration Impact
+
+The execution configuration combines `io_engine`, `iodepth`, and `numjobs`. This makes concurrency differences explicit instead of attributing them to the I/O engine alone.
+
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
+
+```{r iops-execution-config, fig.width=12, fig.height=7}
+iops_execution_config <- sql("
+select concat(io_engine, ' / q', cast(iodepth as varchar), ' / jobs=', cast(numjobs as varchar)) as execution_config,
+       benchmark_rw_mode, primary_iops as iops
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.8d'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
-  and block_volume_performance_class is not null
+  and block_size = (select iops_latency_block_size from report_config)
+order by case when io_engine = 'io_uring' then 1 else 2 end, iodepth, numjobs
 ")
 metric_box(
-  iops_perf_class_8d,
-  x = "block_volume_performance_class",
+  iops_execution_config,
+  x = "execution_config",
   y = "iops",
-  fill = "block_volume_performance_class",
-  title = "g2a.8d block storage IOPS by performance class",
+  fill = "execution_config",
+  title = "IOPS by execution configuration",
   ylab = "IOPS"
 )
 ```
 
-### g2a.30d
+### io_uring Queue Depth
 
-```{r iops-perf-class-30d, fig.width=12, fig.height=7}
-iops_perf_class_30d <- sql("
-select block_volume_performance_class, benchmark_rw_mode, primary_iops as iops
+This diagnostic fixes `io_engine` and `numjobs`, then compares `iodepth`.
+
+```{r iops-iouring-iodepth, fig.width=12, fig.height=7}
+iops_iouring_iodepth <- sql("
+select concat('q', cast(iodepth as varchar)) as iodepth_config, benchmark_rw_mode, primary_iops as iops
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.30d'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
-  and block_volume_performance_class is not null
+  and block_size = (select iops_latency_block_size from report_config)
+  and io_engine = (select default_io_engine from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
-  iops_perf_class_30d,
-  x = "block_volume_performance_class",
+  iops_iouring_iodepth,
+  x = "iodepth_config",
   y = "iops",
-  fill = "block_volume_performance_class",
-  title = "g2a.30d block storage IOPS by performance class",
+  fill = "iodepth_config",
+  title = "io_uring IOPS by queue depth",
   ylab = "IOPS"
 )
 ```
 
-### g2a.120d
+### psync Worker Count
 
-```{r iops-perf-class-120d, fig.width=12, fig.height=7}
-iops_perf_class_120d <- sql("
-select block_volume_performance_class, benchmark_rw_mode, primary_iops as iops
+This diagnostic fixes `io_engine = psync` and `iodepth`, then compares `numjobs`.
+
+```{r iops-psync-numjobs, fig.width=12, fig.height=7}
+iops_psync_numjobs <- sql("
+select concat('jobs=', cast(numjobs as varchar)) as numjobs_config, benchmark_rw_mode, primary_iops as iops
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
-  and block_volume_performance_class is not null
+  and block_size = (select iops_latency_block_size from report_config)
+  and io_engine = 'psync'
+  and iodepth = (select psync_iodepth from report_config)
 ")
 metric_box(
-  iops_perf_class_120d,
-  x = "block_volume_performance_class",
+  iops_psync_numjobs,
+  x = "numjobs_config",
   y = "iops",
-  fill = "block_volume_performance_class",
-  title = "g2a.120d block storage IOPS by performance class",
-  ylab = "IOPS"
-)
-```
-
-## I/O Engine Impact
-
-Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = block`, `block_size = 4k`. I/O engine is the compared dimension and is shown on the x-axis. The `io_uring` measurements use `iodepth = 32`; the `psync` measurements use `iodepth = 1`.
-
-```{r iops-engine, fig.width=12, fig.height=7}
-iops_engine <- sql("
-select io_engine, benchmark_rw_mode, primary_iops as iops
-from fio
-where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
-  and storage_target = 'block'
-  and block_size = '4k'
-  and io_engine in ('psync', 'io_uring')
-")
-metric_box(
-  iops_engine,
-  x = "io_engine",
-  y = "iops",
-  fill = "io_engine",
-  title = "IOPS by I/O engine",
+  fill = "numjobs_config",
+  title = "psync IOPS by worker count",
   ylab = "IOPS"
 )
 ```
@@ -588,18 +865,23 @@ metric_box(
 
 ### Block Storage
 
-Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = block`, `io_engine = io_uring`. Block size is the compared dimension and is therefore shown on the x-axis. Note that the `4k` measurements use `iodepth = 32`, while the `128k` measurements use `iodepth = 16`.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 ```{r iops-block-size, fig.width=12, fig.height=7}
 iops_block_size <- sql("
 select block_size, benchmark_rw_mode, primary_iops as iops
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size in ('4k', '128k')
+  and io_engine = (select default_io_engine from report_config)
+  and numjobs = (select default_numjobs from report_config)
+  and exists (
+    select 1 from report_block_size_comparison comparison
+    where comparison.block_size = fio.block_size
+      and comparison.iodepth = fio.iodepth
+  )
 ")
 metric_box(
   iops_block_size,
@@ -613,18 +895,23 @@ metric_box(
 
 ### Local Storage
 
-Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = local`, `io_engine = io_uring`. Block size is the compared dimension and is therefore shown on the x-axis. Note that the `4k` measurements use `iodepth = 32`, while the `128k` measurements use `iodepth = 16`.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 ```{r iops-block-size-local, fig.width=12, fig.height=7}
 iops_block_size_local <- sql("
 select block_size, benchmark_rw_mode, primary_iops as iops
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'local'
-  and io_engine = 'io_uring'
-  and block_size in ('4k', '128k')
+  and io_engine = (select default_io_engine from report_config)
+  and numjobs = (select default_numjobs from report_config)
+  and exists (
+    select 1 from report_block_size_comparison comparison
+    where comparison.block_size = fio.block_size
+      and comparison.iodepth = fio.iodepth
+  )
 ")
 metric_box(
   iops_block_size_local,
@@ -638,18 +925,20 @@ metric_box(
 
 ## Storage Target Impact
 
-Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 ```{r iops-target, fig.width=12, fig.height=7}
 iops_target <- sql("
 select storage_target, benchmark_rw_mode, primary_iops as iops
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target in ('local', 'block')
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
   iops_target,
@@ -664,64 +953,73 @@ metric_box(
 ```{r iops-summary}
 iops_summary <- sql("
 select benchmark_machine_type, block_volume_performance_class, storage_target,
-       benchmark_rw_mode, io_engine, block_size, iodepth,
+       benchmark_rw_mode, io_engine, block_size, iodepth, numjobs,
+       iodepth * numjobs as effective_concurrency,
        round(median(primary_iops), 2) as median_iops,
        round(avg(primary_iops), 2) as avg_iops,
        count(*) as repetitions
 from fio
 where valid_measurement
-  and block_size = '4k'
-group by 1, 2, 3, 4, 5, 6, 7
-order by 1, 2, 3, 4, 5, 6, 7
+  and block_size = (select iops_latency_block_size from report_config)
+group by 1, 2, 3, 4, 5, 6, 7, 8, 9
+order by 1, 2, 3, 4, 5, 6, 7, 8, 9
 ")
-kable(iops_summary, caption = "IOPS summary for 4k measurements")
+kable(iops_summary, caption = sprintf("IOPS summary for %s measurements", report_config$iops_latency_block_size))
 ```
 
 # Latency
 
-Latency is reported in microseconds. Latency plots focus on `block_size = 4k`; for `io_uring` this means `iodepth = 32`. `128k` measurements use `iodepth = 16` and are intentionally excluded from most latency impact plots because they represent a different throughput-oriented workload.
+Latency is reported in microseconds. Main comparisons use the resolved latency subset shown in the configuration table. Execution-configuration plots show the available engine, queue-depth, and worker-count combinations.
 
 ## Latency Metric Overview
 
-Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = block`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This plot shows average, median, and tail latency for the same fixed workload subset.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 ```{r latency-metric-overview, fig.width=12, fig.height=7}
 latency_metric_overview <- sql("
 select benchmark_rw_mode, 'avg' as latency_metric, primary_clat_mean_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 union all
 select benchmark_rw_mode, 'p50' as latency_metric, primary_clat_p50_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 union all
 select benchmark_rw_mode, 'p99' as latency_metric, primary_clat_p99_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 union all
 select benchmark_rw_mode, 'p99.9' as latency_metric, primary_clat_p999_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
   latency_metric_overview,
@@ -737,7 +1035,7 @@ metric_box(
 
 ### Block Storage
 
-Filter used: `storage_target = block`, `block_volume_performance_class = storage_premium_perf12`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. Instance type is shown on the x-axis.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 #### P99
 
@@ -748,9 +1046,11 @@ select benchmark_machine_type, benchmark_rw_mode,
 from fio
 where valid_measurement
   and storage_target = 'block'
-  and block_volume_performance_class = 'storage_premium_perf12'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and block_volume_performance_class = (select instance_comparison_block_performance_class from report_config)
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
   latency_instance,
@@ -771,9 +1071,11 @@ select benchmark_machine_type, benchmark_rw_mode,
 from fio
 where valid_measurement
   and storage_target = 'block'
-  and block_volume_performance_class = 'storage_premium_perf12'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and block_volume_performance_class = (select instance_comparison_block_performance_class from report_config)
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
   latency_instance_p50,
@@ -787,7 +1089,7 @@ metric_box(
 
 ### Local Storage
 
-Filter used: `storage_target = local`, `block_volume_performance_class = storage_premium_perf6`, `benchmark_rw_mode = randread`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. This narrow subset is used because it is currently comparable across more than one local-storage instance type.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 #### P99
 
@@ -798,10 +1100,12 @@ select benchmark_machine_type, benchmark_rw_mode,
 from fio
 where valid_measurement
   and storage_target = 'local'
-  and block_volume_performance_class = 'storage_premium_perf6'
-  and benchmark_rw_mode = 'randread'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and block_volume_performance_class = (select local_instance_comparison_block_performance_class from report_config)
+  and benchmark_rw_mode = (select local_instance_rw_mode from report_config)
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
   latency_instance_local,
@@ -823,10 +1127,12 @@ select benchmark_machine_type, benchmark_rw_mode,
 from fio
 where valid_measurement
   and storage_target = 'local'
-  and block_volume_performance_class = 'storage_premium_perf6'
-  and benchmark_rw_mode = 'randread'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and block_volume_performance_class = (select local_instance_comparison_block_performance_class from report_config)
+  and benchmark_rw_mode = (select local_instance_rw_mode from report_config)
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
   latency_instance_local_p50,
@@ -841,215 +1147,201 @@ metric_box(
 
 ## Block Storage Performance Class Impact
 
-Filter used: `storage_target = block`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`. The comparison is split by instance type because available performance classes differ by instance. Subsections with only one performance class are kept so newly added measurements appear without changing the report structure.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 ### P99
 
-#### g2a.8d
+```{r latency-perf-class, results='asis', fig.width=12, fig.height=7}
+render_performance_class_plots(
+  "primary_clat_p99_ns / 1000.0",
+  "P99 latency (us)",
+  "P99 latency",
+  "iops_latency_block_size",
+  "iops_latency_iodepth",
+  heading_level = 4
+)
+```
 
-```{r latency-perf-class-8d, fig.width=12, fig.height=7}
-latency_perf_class_8d <- sql("
-select block_volume_performance_class, benchmark_rw_mode,
+### P50
+
+```{r latency-perf-class-p50, results='asis', fig.width=12, fig.height=7}
+render_performance_class_plots(
+  "primary_clat_p50_ns / 1000.0",
+  "P50 latency (us)",
+  "P50 latency",
+  "iops_latency_block_size",
+  "iops_latency_iodepth",
+  heading_level = 4
+)
+```
+
+## Execution Configuration Impact
+
+The execution configuration combines `io_engine`, `iodepth`, and `numjobs`. This makes concurrency differences explicit instead of attributing them to the I/O engine alone.
+
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
+
+### P99
+
+```{r latency-execution-config, fig.width=12, fig.height=7}
+latency_execution_config <- sql("
+select concat(io_engine, ' / q', cast(iodepth as varchar), ' / jobs=', cast(numjobs as varchar)) as execution_config,
+       benchmark_rw_mode,
        primary_clat_p99_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.8d'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
-  and block_volume_performance_class is not null
+  and block_size = (select iops_latency_block_size from report_config)
+order by case when io_engine = 'io_uring' then 1 else 2 end, iodepth, numjobs
 ")
 metric_box(
-  latency_perf_class_8d,
-  x = "block_volume_performance_class",
+  latency_execution_config,
+  x = "execution_config",
   y = "latency_us",
-  fill = "block_volume_performance_class",
-  title = "g2a.8d block storage P99 latency by performance class",
+  fill = "execution_config",
+  title = "P99 latency by execution configuration",
   ylab = "P99 latency (us)"
 )
 ```
 
-#### g2a.30d
+#### io_uring Queue Depth
 
-```{r latency-perf-class-30d, fig.width=12, fig.height=7}
-latency_perf_class_30d <- sql("
-select block_volume_performance_class, benchmark_rw_mode,
+This diagnostic fixes `io_engine` and `numjobs`, then compares `iodepth`.
+
+```{r latency-iouring-iodepth, fig.width=12, fig.height=7}
+latency_iouring_iodepth <- sql("
+select concat('q', cast(iodepth as varchar)) as iodepth_config, benchmark_rw_mode,
        primary_clat_p99_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.30d'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
-  and block_volume_performance_class is not null
+  and block_size = (select iops_latency_block_size from report_config)
+  and io_engine = (select default_io_engine from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
-  latency_perf_class_30d,
-  x = "block_volume_performance_class",
+  latency_iouring_iodepth,
+  x = "iodepth_config",
   y = "latency_us",
-  fill = "block_volume_performance_class",
-  title = "g2a.30d block storage P99 latency by performance class",
+  fill = "iodepth_config",
+  title = "io_uring P99 latency by queue depth",
   ylab = "P99 latency (us)"
 )
 ```
 
-#### g2a.120d
+#### psync Worker Count
 
-```{r latency-perf-class-120d, fig.width=12, fig.height=7}
-latency_perf_class_120d <- sql("
-select block_volume_performance_class, benchmark_rw_mode,
+This diagnostic fixes `io_engine = psync` and `iodepth`, then compares `numjobs`.
+
+```{r latency-psync-numjobs, fig.width=12, fig.height=7}
+latency_psync_numjobs <- sql("
+select concat('jobs=', cast(numjobs as varchar)) as numjobs_config, benchmark_rw_mode,
        primary_clat_p99_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
-  and block_volume_performance_class is not null
+  and block_size = (select iops_latency_block_size from report_config)
+  and io_engine = 'psync'
+  and iodepth = (select psync_iodepth from report_config)
 ")
 metric_box(
-  latency_perf_class_120d,
-  x = "block_volume_performance_class",
+  latency_psync_numjobs,
+  x = "numjobs_config",
   y = "latency_us",
-  fill = "block_volume_performance_class",
-  title = "g2a.120d block storage P99 latency by performance class",
+  fill = "numjobs_config",
+  title = "psync P99 latency by worker count",
   ylab = "P99 latency (us)"
 )
 ```
 
 ### P50
 
-#### g2a.8d
-
-```{r latency-perf-class-p50-8d, fig.width=12, fig.height=7}
-latency_perf_class_p50_8d <- sql("
-select block_volume_performance_class, benchmark_rw_mode,
+```{r latency-execution-config-p50, fig.width=12, fig.height=7}
+latency_execution_config_p50 <- sql("
+select concat(io_engine, ' / q', cast(iodepth as varchar), ' / jobs=', cast(numjobs as varchar)) as execution_config,
+       benchmark_rw_mode,
        primary_clat_p50_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.8d'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
-  and block_volume_performance_class is not null
+  and block_size = (select iops_latency_block_size from report_config)
+order by case when io_engine = 'io_uring' then 1 else 2 end, iodepth, numjobs
 ")
 metric_box(
-  latency_perf_class_p50_8d,
-  x = "block_volume_performance_class",
+  latency_execution_config_p50,
+  x = "execution_config",
   y = "latency_us",
-  fill = "block_volume_performance_class",
-  title = "g2a.8d block storage P50 latency by performance class",
+  fill = "execution_config",
+  title = "P50 latency by execution configuration",
   ylab = "P50 latency (us)"
 )
 ```
 
-#### g2a.30d
+#### io_uring Queue Depth
 
-```{r latency-perf-class-p50-30d, fig.width=12, fig.height=7}
-latency_perf_class_p50_30d <- sql("
-select block_volume_performance_class, benchmark_rw_mode,
+```{r latency-iouring-iodepth-p50, fig.width=12, fig.height=7}
+latency_iouring_iodepth_p50 <- sql("
+select concat('q', cast(iodepth as varchar)) as iodepth_config, benchmark_rw_mode,
        primary_clat_p50_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.30d'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
-  and block_volume_performance_class is not null
+  and block_size = (select iops_latency_block_size from report_config)
+  and io_engine = (select default_io_engine from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
-  latency_perf_class_p50_30d,
-  x = "block_volume_performance_class",
+  latency_iouring_iodepth_p50,
+  x = "iodepth_config",
   y = "latency_us",
-  fill = "block_volume_performance_class",
-  title = "g2a.30d block storage P50 latency by performance class",
+  fill = "iodepth_config",
+  title = "io_uring P50 latency by queue depth",
   ylab = "P50 latency (us)"
 )
 ```
 
-#### g2a.120d
+#### psync Worker Count
 
-```{r latency-perf-class-p50-120d, fig.width=12, fig.height=7}
-latency_perf_class_p50_120d <- sql("
-select block_volume_performance_class, benchmark_rw_mode,
+```{r latency-psync-numjobs-p50, fig.width=12, fig.height=7}
+latency_psync_numjobs_p50 <- sql("
+select concat('jobs=', cast(numjobs as varchar)) as numjobs_config, benchmark_rw_mode,
        primary_clat_p50_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size = '4k'
-  and block_volume_performance_class is not null
+  and block_size = (select iops_latency_block_size from report_config)
+  and io_engine = 'psync'
+  and iodepth = (select psync_iodepth from report_config)
 ")
 metric_box(
-  latency_perf_class_p50_120d,
-  x = "block_volume_performance_class",
+  latency_psync_numjobs_p50,
+  x = "numjobs_config",
   y = "latency_us",
-  fill = "block_volume_performance_class",
-  title = "g2a.120d block storage P50 latency by performance class",
-  ylab = "P50 latency (us)"
-)
-```
-
-## I/O Engine Impact
-
-Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = block`, `block_size = 4k`. The `io_uring` measurements use `iodepth = 32`; the `psync` measurements use `iodepth = 1`.
-
-### P99
-
-```{r latency-engine, fig.width=12, fig.height=7}
-latency_engine <- sql("
-select io_engine, benchmark_rw_mode,
-       primary_clat_p99_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
-  and storage_target = 'block'
-  and block_size = '4k'
-  and io_engine in ('psync', 'io_uring')
-")
-metric_box(
-  latency_engine,
-  x = "io_engine",
-  y = "latency_us",
-  fill = "io_engine",
-  title = "P99 latency by I/O engine",
-  ylab = "P99 latency (us)"
-)
-```
-
-### P50
-
-```{r latency-engine-p50, fig.width=12, fig.height=7}
-latency_engine_p50 <- sql("
-select io_engine, benchmark_rw_mode,
-       primary_clat_p50_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
-  and storage_target = 'block'
-  and block_size = '4k'
-  and io_engine in ('psync', 'io_uring')
-")
-metric_box(
-  latency_engine_p50,
-  x = "io_engine",
-  y = "latency_us",
-  fill = "io_engine",
-  title = "P50 latency by I/O engine",
+  fill = "numjobs_config",
+  title = "psync P50 latency by worker count",
   ylab = "P50 latency (us)"
 )
 ```
 
 ## Block Size Impact
 
-The rest of the latency section focuses on `4k` because it is the latency-oriented workload. The following plots are included only to make the block-size effect visible; `128k` latency should not be mixed into the other latency comparisons. These block-size plots compare `io_uring/4k/iodepth=32` with `io_uring/128k/iodepth=16`.
+The following plots make the configured block-size effect visible. Queue depth is matched per block size using the resolved `block_size_comparison` mapping.
 
 ### Block Storage
 
-Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = block`, `io_engine = io_uring`. Block size is the compared dimension and is therefore shown on the x-axis. Note that the `4k` measurements use `iodepth = 32`, while the `128k` measurements use `iodepth = 16`.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 #### P99
 
@@ -1059,11 +1351,16 @@ select block_size, benchmark_rw_mode,
        primary_clat_p99_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size in ('4k', '128k')
+  and io_engine = (select default_io_engine from report_config)
+  and numjobs = (select default_numjobs from report_config)
+  and exists (
+    select 1 from report_block_size_comparison comparison
+    where comparison.block_size = fio.block_size
+      and comparison.iodepth = fio.iodepth
+  )
 ")
 metric_box(
   latency_block_size,
@@ -1083,11 +1380,16 @@ select block_size, benchmark_rw_mode,
        primary_clat_p50_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'block'
-  and io_engine = 'io_uring'
-  and block_size in ('4k', '128k')
+  and io_engine = (select default_io_engine from report_config)
+  and numjobs = (select default_numjobs from report_config)
+  and exists (
+    select 1 from report_block_size_comparison comparison
+    where comparison.block_size = fio.block_size
+      and comparison.iodepth = fio.iodepth
+  )
 ")
 metric_box(
   latency_block_size_p50,
@@ -1101,7 +1403,7 @@ metric_box(
 
 ### Local Storage
 
-Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `storage_target = local`, `io_engine = io_uring`. Block size is the compared dimension and is therefore shown on the x-axis. Note that the `4k` measurements use `iodepth = 32`, while the `128k` measurements use `iodepth = 16`.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 #### P99
 
@@ -1111,11 +1413,16 @@ select block_size, benchmark_rw_mode,
        primary_clat_p99_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'local'
-  and io_engine = 'io_uring'
-  and block_size in ('4k', '128k')
+  and io_engine = (select default_io_engine from report_config)
+  and numjobs = (select default_numjobs from report_config)
+  and exists (
+    select 1 from report_block_size_comparison comparison
+    where comparison.block_size = fio.block_size
+      and comparison.iodepth = fio.iodepth
+  )
 ")
 metric_box(
   latency_block_size_local,
@@ -1135,11 +1442,16 @@ select block_size, benchmark_rw_mode,
        primary_clat_p50_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target = 'local'
-  and io_engine = 'io_uring'
-  and block_size in ('4k', '128k')
+  and io_engine = (select default_io_engine from report_config)
+  and numjobs = (select default_numjobs from report_config)
+  and exists (
+    select 1 from report_block_size_comparison comparison
+    where comparison.block_size = fio.block_size
+      and comparison.iodepth = fio.iodepth
+  )
 ")
 metric_box(
   latency_block_size_local_p50,
@@ -1153,7 +1465,7 @@ metric_box(
 
 ## Storage Target Impact
 
-Filter used: `benchmark_machine_type = g2a.120d`, `block_volume_performance_class = storage_premium_perf29`, `io_engine = io_uring`, `block_size = 4k`, `iodepth = 32`.
+Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
 
 ### P99
 
@@ -1163,11 +1475,13 @@ select storage_target, benchmark_rw_mode,
        primary_clat_p99_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target in ('local', 'block')
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
   latency_target,
@@ -1187,11 +1501,13 @@ select storage_target, benchmark_rw_mode,
        primary_clat_p50_ns / 1000.0 as latency_us
 from fio
 where valid_measurement
-  and benchmark_machine_type = 'g2a.120d'
-  and block_volume_performance_class = 'storage_premium_perf29'
+  and benchmark_machine_type = (select reference_machine_type from report_config)
+  and block_volume_performance_class = (select reference_block_performance_class from report_config)
   and storage_target in ('local', 'block')
-  and io_engine = 'io_uring'
-  and block_size = '4k'
+  and io_engine = (select default_io_engine from report_config)
+  and block_size = (select iops_latency_block_size from report_config)
+  and iodepth = (select iops_latency_iodepth from report_config)
+  and numjobs = (select default_numjobs from report_config)
 ")
 metric_box(
   latency_target_p50,
@@ -1206,7 +1522,8 @@ metric_box(
 ```{r latency-summary}
 latency_summary <- sql("
 select benchmark_machine_type, block_volume_performance_class, storage_target,
-       benchmark_rw_mode, io_engine, block_size, iodepth,
+       benchmark_rw_mode, io_engine, block_size, iodepth, numjobs,
+       iodepth * numjobs as effective_concurrency,
        round(median(primary_clat_mean_ns) / 1000.0, 2) as median_avg_us,
        round(median(primary_clat_p50_ns) / 1000.0, 2) as median_p50_us,
        round(median(primary_clat_p99_ns) / 1000.0, 2) as median_p99_us,
@@ -1214,11 +1531,11 @@ select benchmark_machine_type, block_volume_performance_class, storage_target,
        count(*) as repetitions
 from fio
 where valid_measurement
-  and block_size = '4k'
-group by 1, 2, 3, 4, 5, 6, 7
-order by 1, 2, 3, 4, 5, 6, 7
+  and block_size = (select iops_latency_block_size from report_config)
+group by 1, 2, 3, 4, 5, 6, 7, 8, 9
+order by 1, 2, 3, 4, 5, 6, 7, 8, 9
 ")
-kable(latency_summary, caption = "Latency summary for 4k measurements")
+kable(latency_summary, caption = sprintf("Latency summary for %s measurements", report_config$iops_latency_block_size))
 ```
 
 # OS Tuning Coverage
@@ -1254,13 +1571,14 @@ if (nrow(sql("select * from failures")) == 0) {
 ```{r local-target-coverage}
 local_summary <- sql("
 select benchmark_machine_type, block_volume_performance_class, storage_target,
-       benchmark_rw_mode, io_engine, block_size,
+       benchmark_rw_mode, io_engine, block_size, iodepth, numjobs,
+       iodepth * numjobs as effective_concurrency,
        sum(case when valid_measurement then 1 else 0 end) as valid_repetitions,
        sum(case when not valid_measurement then 1 else 0 end) as invalid_repetitions
 from fio
 where storage_target = 'local'
-group by 1, 2, 3, 4, 5, 6
-order by 1, 2, 3, 4, 5, 6
+group by 1, 2, 3, 4, 5, 6, 7, 8, 9
+order by 1, 2, 3, 4, 5, 6, 7, 8, 9
 ")
 if (nrow(local_summary) == 0) {
   cat("No local-target measurements were parsed.")

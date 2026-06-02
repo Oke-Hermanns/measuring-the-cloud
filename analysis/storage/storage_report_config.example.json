@@ -1,0 +1,49 @@
+{
+  "reference_machine_type": "g2a.120d",
+  "instance_comparison_block_performance_class": "storage_premium_perf12",
+  "local_instance_comparison_block_performance_class": "storage_premium_perf6",
+  "reference_block_performance_class": "storage_premium_perf29",
+  "local_instance_rw_mode": "randread",
+  "default_io_engine": "io_uring",
+  "throughput_block_size": "128k",
+  "throughput_iodepth": 16,
+  "iops_latency_block_size": "4k",
+  "iops_latency_iodepth": 32,
+  "default_numjobs": 1,
+  "psync_iodepth": 1,
+  "psync_numjobs": 1,
+  "block_size_comparison": [
+    {
+      "block_size": "4k",
+      "iodepth": 32
+    },
+    {
+      "block_size": "128k",
+      "iodepth": 16
+    }
+  ],
+  "performance_class_machine_types": [
+    "g2a.8d",
+    "g2a.30d",
+    "g2a.120d"
+  ],
+  "preferred_machine_order": [
+    "g2a.8d",
+    "g2a.30d",
+    "g2a.120d"
+  ],
+  "preferred_workload_order": [
+    "randread",
+    "randwrite",
+    "read",
+    "write"
+  ],
+  "preferred_engine_order": [
+    "psync",
+    "io_uring"
+  ],
+  "preferred_target_order": [
+    "local",
+    "block"
+  ]
+}

@@ -43,3 +43,18 @@ nix develop .#analysis --command Rscript analysis/storage/render_storage_benchma
 This produces:
 
 - `analysis/storage/all/storage_benchmark_analysis_all.html`
+
+The renderer accepts an optional JSON file with report constants:
+
+```bash
+nix develop .#analysis --command Rscript \
+  analysis/storage/render_storage_benchmark_analysis.R \
+  all \
+  --config analysis/storage/storage_report_config.example.json
+```
+
+The default values are documented in
+`analysis/storage/storage_report_config.example.json`. Explicit JSON values take
+precedence. Without an override, zoom-in dimensions with exactly one available
+value are selected automatically. The rendered report includes the resolved
+configuration.
