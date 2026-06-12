@@ -88,7 +88,10 @@ run_scenario() {
 
   [[ -n "${SCENARIO_NAME:-}" ]] || die "${scenario_file}: SCENARIO_NAME is required"
   [[ "$SCENARIO_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || die "${scenario_file}: SCENARIO_NAME contains unsafe characters"
-  [[ "${PROVIDER:-}" == "stackit" ]] || die "${scenario_file}: only PROVIDER=stackit is currently implemented"
+  case "${PROVIDER:-}" in
+    stackit|aws) ;;
+    *) die "${scenario_file}: PROVIDER must be one of: stackit, aws" ;;
+  esac
   [[ -n "${TOFU_DIR:-}" ]] || die "${scenario_file}: TOFU_DIR is required"
   [[ -n "${TFVARS_FILE:-}" ]] || die "${scenario_file}: TFVARS_FILE is required"
   BENCHMARK_DIR="${BENCHMARK_DIR:-storage/benchmarks/full}"

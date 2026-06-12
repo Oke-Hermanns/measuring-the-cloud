@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() {
+  echo "[cloud-measuring][$(date --iso-8601=seconds)] $*" | tee -a /var/log/cloud-measuring-user-data.log
+}
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y fio jq rsync sysstat iproute2 ethtool util-linux xfsprogs
+
+mkdir -p /opt/cloud-measuring/{state,bin,results}
+chown -R ubuntu:ubuntu /opt/cloud-measuring
+
+cat >/opt/cloud-measuring/node.env <<EOF
+NODE_ROLE=storage
+EOF
+chown ubuntu:ubuntu /opt/cloud-measuring/node.env
+
+cat >/opt/cloud-measuring/bin/apply-os-tuning.sh <<'TUNING'
+#!/usr/bin/env bash
+set -euo pipefail
+
+profile="$${1:-standard}"
+
+log() {
+  echo "[os-tuning][$(date --iso-8601=seconds)] $*"
+}
+
+apply_sysctl() {
+  local key="$1"
+  local value="$2"
+  local before=""
+  before="$(sysctl -n "$key" 2>/dev/null || true)"
+  log "sysctl $${key}: '$${before}' -> '$${value}'"
+  sysctl -w "$${key}=$${value}"
+}
+
+log "profile=$${profile}"
+log "kernel=$(uname -r)"
+
+case "$profile" in
+  standard)
+    log "standard profile selected; no storage tuning applied"
+    ;;
+  tuned)
+    apply_sysctl vm.dirty_background_ratio 5
+    apply_sysctl vm.dirty_ratio 20
+    apply_sysctl vm.swappiness 1
+    apply_sysctl vm.vfs_cache_pressure 50
+    apply_sysctl vm.dirty_expire_centisecs 3000
+    apply_sysctl vm.dirty_writeback_centisecs 500
+    ;;
+  *)
+    echo "unknown OS tuning profile: $${profile}" >&2
+    exit 1
+    ;;
+esac
+TUNING
+chmod +x /opt/cloud-measuring/bin/apply-os-tuning.sh
+
+root_disk() {
+  local root_source root_pkname root_name
+  root_source="$(findmnt -n -o SOURCE / || true)"
+  [[ -n "$${root_source}" ]] || return 0
+
+  root_pkname="$(lsblk -no PKNAME "$${root_source}" 2>/dev/null | head -n1 || true)"
+  if [[ -n "$${root_pkname}" ]]; then
+    printf '/dev/%s\n' "$${root_pkname}"
+    return 0
+  fi
+
+  root_name="$(lsblk -no NAME "$${root_source}" 2>/dev/null | head -n1 || true)"
+  if [[ -n "$${root_name}" ]]; then
+    printf '/dev/%s\n' "$${root_name}"
+  fi
+}
+
+disk_size_gib() {
+  local device="$1"
+  local sectors size_bytes
+  sectors="$(blockdev --getsz "$${device}" 2>/dev/null || true)"
+  if [[ "$${sectors}" =~ ^[0-9]+$ ]]; then
+    size_bytes=$((sectors * 512))
+    echo $(((size_bytes + 1024 * 1024 * 1024 - 1) / (1024 * 1024 * 1024)))
+    return 0
+  fi
+  echo 0
+}
+
+disk_mountpoints() {
+  local device="$1"
+  lsblk -nr -o MOUNTPOINT "$${device}" 2>/dev/null | sed '/^$/d' || true
+}
+
+unmount_disk_mountpoints() {
+  local device="$1"
+  local mountpoint
+  disk_mountpoints "$${device}" | sort -r | while read -r mountpoint; do
+    [[ -n "$${mountpoint}" ]] || continue
+    log "unmounting existing mount $${mountpoint} from $${device}"
+    umount "$${mountpoint}"
+  done
+}
+
+disk_model() {
+  local device="$1"
+  local name
+  name="$(basename "$${device}")"
+  cat "/sys/block/$${name}/device/model" 2>/dev/null || true
+}
+
+disk_is_aws_instance_store() {
+  local device="$1"
+  local model
+  model="$(disk_model "$${device}")"
+  [[ "$${model}" == *"Instance Storage"* ]]
+}
+
+root_disk_resolved() {
+  local root
+  root="$(root_disk)"
+  [[ -n "$${root}" ]] || return 0
+  readlink -f "$${root}"
+}
+
+wait_for_instance_store_disk() {
+  local attempts="$${1:-60}"
+  local delay_s="$${2:-2}"
+  local root
+  local dev
+  root="$(root_disk_resolved)"
+
+  for _ in $(seq 1 "$${attempts}"); do
+    for dev in /dev/nvme*n1 /dev/xvd? /dev/sd?; do
+      [[ -b "$${dev}" ]] || continue
+      [[ "$(readlink -f "$${dev}")" != "$${root}" ]] || continue
+      if disk_is_aws_instance_store "$${dev}"; then
+        readlink -f "$${dev}"
+        return 0
+      fi
+    done
+    sleep "$${delay_s}"
+  done
+}
+
+prepare_mount() {
+  local device="$1"
+  local mount_point="$2"
+  local fstype="$${3:-ext4}"
+
+  [[ -n "$${device}" ]] || return 0
+
+  mkdir -p "$${mount_point}"
+
+  if ! blkid "$${device}" >/dev/null 2>&1; then
+    log "formatting $${device} as $${fstype}"
+    if [[ "$${fstype}" == "xfs" ]]; then
+      mkfs.xfs -f "$${device}"
+    else
+      mkfs.ext4 -F "$${device}"
+    fi
+  fi
+
+  mount "$${device}" "$${mount_point}"
+  chown ubuntu:ubuntu "$${mount_point}"
+
+  local uuid
+  uuid="$(blkid -s UUID -o value "$${device}")"
+  grep -q "$${uuid}" /etc/fstab || echo "UUID=$${uuid} $${mount_point} $${fstype} defaults,nofail 0 2" >> /etc/fstab
+}
+
+wait_for_ebs_volume() {
+  local volume_id="$1"
+  local attempts="$${2:-60}"
+  local delay_s="$${3:-2}"
+  local volume_id_squeezed
+  local candidate
+  volume_id_squeezed="$${volume_id//-/}"
+
+  for _ in $(seq 1 "$${attempts}"); do
+    for candidate in \
+      "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$${volume_id}" \
+      "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$${volume_id_squeezed}"; do
+      if [[ -e "$${candidate}" ]]; then
+        readlink -f "$${candidate}"
+        return 0
+      fi
+    done
+    sleep "$${delay_s}"
+  done
+}
+
+storage_targets=()
+local_storage="${benchmark_local_storage}"
+local_mount_point="${benchmark_local_mount_point}"
+block_volume_size_gib="${benchmark_block_volume_size_gib}"
+block_volume_id="${benchmark_block_volume_id}"
+block_mount_point="${benchmark_block_mount_point}"
+storage_env_path="${benchmark_storage_env_path}"
+
+local_device=""
+block_device=""
+
+if [[ "$${local_storage}" == "auto" ]]; then
+  local_device="$(wait_for_instance_store_disk)"
+
+  if [[ -n "$${local_device}" ]]; then
+    log "preparing AWS instance-store device $${local_device} ($(disk_size_gib "$${local_device}") GiB)"
+    unmount_disk_mountpoints "$${local_device}"
+    prepare_mount "$${local_device}" "$${local_mount_point}" "xfs"
+    storage_targets+=("local")
+  else
+    log "no AWS instance-store device was discovered"
+  fi
+else
+  log "AWS instance-store preparation disabled"
+fi
+
+if [[ "$${block_volume_size_gib}" =~ ^[0-9]+$ ]] && (( block_volume_size_gib > 0 )); then
+  block_device="$(wait_for_ebs_volume "$${block_volume_id}")"
+
+  if [[ -n "$${block_device}" ]]; then
+    log "preparing AWS EBS block-volume device $${block_device} ($(disk_size_gib "$${block_device}") GiB) for volume $${block_volume_id}"
+    unmount_disk_mountpoints "$${block_device}"
+    prepare_mount "$${block_device}" "$${block_mount_point}" "ext4"
+    storage_targets+=("block")
+  else
+    log "no EBS block volume device was discovered for volume $${block_volume_id}"
+  fi
+fi
+
+mkdir -p "$(dirname "$${storage_env_path}")"
+{
+  echo "export STORAGE_TARGETS=$(printf '%q' "$${storage_targets[*]}")"
+  echo "export STORAGE_ROOT_DEVICE=$(printf '%q' "$(root_disk)")"
+  [[ -n "$${local_device}" ]] && echo "export STORAGE_LOCAL_DEVICE=$(printf '%q' "$${local_device}")"
+  [[ -n "$${local_device}" ]] && echo "export STORAGE_LOCAL_MOUNT=$(printf '%q' "$${local_mount_point}")"
+  [[ -n "$${block_device}" ]] && echo "export STORAGE_BLOCK_DEVICE=$(printf '%q' "$${block_device}")"
+  [[ -n "$${block_device}" ]] && echo "export STORAGE_BLOCK_MOUNT=$(printf '%q' "$${block_mount_point}")"
+} >"$${storage_env_path}"
+chown ubuntu:ubuntu "$${storage_env_path}"
+
+log "storage benchmark node bootstrap complete"
