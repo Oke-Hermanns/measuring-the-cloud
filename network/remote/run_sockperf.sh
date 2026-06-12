@@ -10,6 +10,7 @@ MSG_SIZE="64"
 RUNTIME_SEC="10"
 OUT_DIR=""
 CPU_LIST=""
+SOCKPERF_NOFILE_LIMIT="${SOCKPERF_NOFILE_LIMIT:-32768}"
 
 default_cpu_list() {
   local n
@@ -50,12 +51,20 @@ command -v sockperf >/dev/null 2>&1 || { echo "sockperf not found" >&2; exit 1; 
 command -v taskset >/dev/null 2>&1 || { echo "taskset not found" >&2; exit 1; }
 CPU_LIST="${CPU_LIST:-$(default_cpu_list)}"
 
+cap_sockperf_nofile() {
+  if [[ -n "$SOCKPERF_NOFILE_LIMIT" && "$SOCKPERF_NOFILE_LIMIT" =~ ^[0-9]+$ ]]; then
+    ulimit -Hn "$SOCKPERF_NOFILE_LIMIT" 2>/dev/null || true
+    ulimit -Sn "$SOCKPERF_NOFILE_LIMIT" 2>/dev/null || true
+  fi
+}
+
 proto_args=()
 if [[ "$PROTOCOL" == "tcp" ]]; then
   proto_args+=(--tcp)
 fi
 
 if [[ "$ROLE" == "server" ]]; then
+  cap_sockperf_nofile
   exec taskset -c "$CPU_LIST" sockperf server "${proto_args[@]}" --ip 0.0.0.0 --port "$PORT"
 fi
 
@@ -72,6 +81,7 @@ done
 printf '\n' >>"${OUT_DIR}/client.cmd"
 
 set +e
+cap_sockperf_nofile
 "${cmd[@]}" >"${OUT_DIR}/sockperf.log" 2>&1
 rc=$?
 set -e

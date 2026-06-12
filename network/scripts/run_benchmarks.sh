@@ -85,6 +85,8 @@ CLIENT_MACHINE_TYPE="$(tofu_output_raw "$tofu" "$TOFU_DIR" client_machine_type)"
 SERVER_MACHINE_TYPE="$(tofu_output_raw "$tofu" "$TOFU_DIR" server_machine_type)"
 CLIENT_AVAILABILITY_ZONE="$(tofu_output_raw "$tofu" "$TOFU_DIR" client_availability_zone)"
 SERVER_AVAILABILITY_ZONE="$(tofu_output_raw "$tofu" "$TOFU_DIR" server_availability_zone)"
+PLACEMENT_GROUP_NAME="$("$tofu" -chdir="$TOFU_DIR" output -raw placement_group_name 2>/dev/null || true)"
+PLACEMENT_GROUP_STRATEGY="$("$tofu" -chdir="$TOFU_DIR" output -raw placement_group_strategy 2>/dev/null || true)"
 require_file "$SSH_KEY"
 
 REMOTE_SCENARIO_DIR="${REMOTE_RESULTS_ROOT}/${RUN_ID}/${SCENARIO_NAME}"
@@ -277,13 +279,13 @@ kill_stale_server() {
 write_remote_metadata() {
   local tmp
   tmp="$(mktemp /tmp/cloud-measuring-scenario.XXXXXX.env)"
-  write_env_file "$tmp" RUN_ID SCENARIO_NAME OS_TUNING INSTANCE_AFFINITY ACCESS_MODE CLIENT_PUBLIC_IP SERVER_PUBLIC_IP CLIENT_PRIVATE_IP SERVER_PRIVATE_IP CLIENT_SSH_HOST SERVER_SSH_HOST SSH_USER CLIENT_MACHINE_TYPE SERVER_MACHINE_TYPE CLIENT_AVAILABILITY_ZONE SERVER_AVAILABILITY_ZONE CLIENT_CPU_LIST SERVER_CPU_LIST
+  write_env_file "$tmp" RUN_ID SCENARIO_NAME OS_TUNING INSTANCE_AFFINITY PLACEMENT_GROUP_NAME PLACEMENT_GROUP_STRATEGY ACCESS_MODE CLIENT_PUBLIC_IP SERVER_PUBLIC_IP CLIENT_PRIVATE_IP SERVER_PRIVATE_IP CLIENT_SSH_HOST SERVER_SSH_HOST SSH_USER CLIENT_MACHINE_TYPE SERVER_MACHINE_TYPE CLIENT_AVAILABILITY_ZONE SERVER_AVAILABILITY_ZONE CLIENT_CPU_LIST SERVER_CPU_LIST
   scp_to "$tmp" "$CLIENT_SSH_HOST" "${REMOTE_SCENARIO_DIR}/scenario.env"
   scp_to "$tmp" "$SERVER_SSH_HOST" "${REMOTE_SCENARIO_DIR}/scenario.env"
   rm -f "$tmp"
 
   local meta_cmd
-  meta_cmd="mkdir -p '${REMOTE_SCENARIO_DIR}' && { date -u +%Y-%m-%dT%H:%M:%SZ; hostname; uname -a; lscpu; ip addr; ip route; command -v ethtool >/dev/null 2>&1 && ethtool -i \$(ip route get 1.1.1.1 | awk '/dev/ {for (i=1;i<=NF;i++) if (\$i==\"dev\") print \$(i+1); exit}') || true; fio --version || true; iperf3 --version 2>/dev/null | head -n1 || true; sockperf --version || true; } >'${REMOTE_SCENARIO_DIR}/node-meta.log' 2>&1"
+  meta_cmd="mkdir -p '${REMOTE_SCENARIO_DIR}' && { date -u +%Y-%m-%dT%H:%M:%SZ; hostname; uname -a; lscpu; echo '---LIMITS---'; printf 'ulimit_soft_nofile='; ulimit -Sn; printf 'ulimit_hard_nofile='; ulimit -Hn; cat /proc/\$\$/limits; echo '---NETWORK---'; ip addr; ip route; command -v ethtool >/dev/null 2>&1 && ethtool -i \$(ip route get 1.1.1.1 | awk '/dev/ {for (i=1;i<=NF;i++) if (\$i==\"dev\") print \$(i+1); exit}') || true; echo '---TOOLS---'; fio --version || true; iperf3 --version 2>/dev/null | head -n1 || true; bash -lc 'ulimit -Hn 32768 2>/dev/null || true; ulimit -Sn 32768 2>/dev/null || true; sockperf --version' || true; } >'${REMOTE_SCENARIO_DIR}/node-meta.log' 2>&1"
   ssh_run "$CLIENT_SSH_HOST" "$meta_cmd"
   ssh_run "$SERVER_SSH_HOST" "$meta_cmd"
 }
@@ -323,7 +325,7 @@ write_benchmark_env() {
   write_env_file "$tmp" \
     BENCHMARK_NAME BENCHMARK_TOOL REPETITIONS COOLDOWN_SEC SERVER_READY_TIMEOUT_SEC INSTANCE_AFFINITY \
     IPERF3_PROTOCOL IPERF3_PORT IPERF3_RUNTIME_SEC IPERF3_OMIT_SEC IPERF3_PARALLEL IPERF3_TCP_LENGTH IPERF3_UDP_BITRATE IPERF3_UDP_LENGTH \
-    SOCKPERF_PROTOCOL SOCKPERF_MODE SOCKPERF_PORT SOCKPERF_MSG_SIZE SOCKPERF_RUNTIME_SEC
+    SOCKPERF_PROTOCOL SOCKPERF_MODE SOCKPERF_PORT SOCKPERF_MSG_SIZE SOCKPERF_RUNTIME_SEC SOCKPERF_NOFILE_LIMIT
   scp_to "$tmp" "$CLIENT_SSH_HOST" "${remote_bench_dir}/benchmark.env"
   scp_to "$tmp" "$SERVER_SSH_HOST" "${remote_bench_dir}/benchmark.env"
   rm -f "$tmp"
@@ -459,12 +461,14 @@ run_sockperf_benchmark() {
   SOCKPERF_PORT="${SOCKPERF_PORT:-11111}"
   SOCKPERF_MSG_SIZE="${SOCKPERF_MSG_SIZE:-64}"
   SOCKPERF_RUNTIME_SEC="${SOCKPERF_RUNTIME_SEC:-10}"
+  SOCKPERF_NOFILE_LIMIT="${SOCKPERF_NOFILE_LIMIT:-32768}"
 
   [[ "$SOCKPERF_PROTOCOL" == "tcp" || "$SOCKPERF_PROTOCOL" == "udp" ]] || die "${benchmark_file}: SOCKPERF_PROTOCOL must be tcp or udp"
   [[ "$SOCKPERF_MODE" == "pp" ]] || die "${benchmark_file}: only SOCKPERF_MODE=pp is supported"
   validate_int SOCKPERF_PORT "$SOCKPERF_PORT"
   validate_int SOCKPERF_MSG_SIZE "$SOCKPERF_MSG_SIZE"
   validate_int SOCKPERF_RUNTIME_SEC "$SOCKPERF_RUNTIME_SEC"
+  validate_int SOCKPERF_NOFILE_LIMIT "$SOCKPERF_NOFILE_LIMIT"
   validate_int REPETITIONS "$REPETITIONS"
   validate_int COOLDOWN_SEC "$COOLDOWN_SEC"
   validate_int SERVER_READY_TIMEOUT_SEC "$SERVER_READY_TIMEOUT_SEC"
@@ -500,7 +504,7 @@ for benchmark_file in "${benchmark_files[@]}"; do
   unset BENCHMARK_NAME BENCHMARK_TOOL SKIP SKIP_REASON
   unset REPETITIONS COOLDOWN_SEC SERVER_READY_TIMEOUT_SEC
   unset IPERF3_PROTOCOL IPERF3_PORT IPERF3_RUNTIME_SEC IPERF3_OMIT_SEC IPERF3_PARALLEL IPERF3_TCP_LENGTH IPERF3_UDP_BITRATE IPERF3_UDP_LENGTH
-  unset SOCKPERF_PROTOCOL SOCKPERF_MODE SOCKPERF_PORT SOCKPERF_MSG_SIZE SOCKPERF_RUNTIME_SEC
+  unset SOCKPERF_PROTOCOL SOCKPERF_MODE SOCKPERF_PORT SOCKPERF_MSG_SIZE SOCKPERF_RUNTIME_SEC SOCKPERF_NOFILE_LIMIT
   REPETITIONS=1
   COOLDOWN_SEC=2
   SERVER_READY_TIMEOUT_SEC=15

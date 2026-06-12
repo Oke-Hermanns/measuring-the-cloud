@@ -1,0 +1,130 @@
+variable "project_name" {
+  description = "Resource name prefix"
+  type        = string
+  default     = "cloud-measuring-net"
+}
+
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "eu-central-1"
+}
+
+variable "aws_profile" {
+  description = "AWS CLI profile to use. Leave empty to use environment or instance credentials."
+  type        = string
+  default     = ""
+}
+
+variable "vpc_cidr" {
+  description = "Benchmark VPC CIDR"
+  type        = string
+  default     = "10.74.0.0/16"
+}
+
+variable "client_subnet_cidr" {
+  description = "Subnet CIDR for the client availability zone"
+  type        = string
+  default     = "10.74.1.0/24"
+}
+
+variable "server_subnet_cidr" {
+  description = "Subnet CIDR for the server availability zone. Used only when server availability zone differs from client availability zone."
+  type        = string
+  default     = "10.74.2.0/24"
+}
+
+variable "ssh_ingress_cidr" {
+  description = "CIDR allowed to SSH into benchmark instances"
+  type        = string
+  default     = "0.0.0.0/0"
+}
+
+variable "ssh_public_key_path" {
+  description = "Path to SSH public key, required unless existing_key_pair_name is set"
+  type        = string
+  default     = ""
+}
+
+variable "ssh_private_key_path" {
+  description = "Path to SSH private key used by local scripts"
+  type        = string
+}
+
+variable "existing_key_pair_name" {
+  description = "Existing AWS key pair name. If set, no key pair is created."
+  type        = string
+  default     = ""
+}
+
+variable "assign_public_ip" {
+  description = "Whether to assign public IPs to the benchmark client and server"
+  type        = bool
+  default     = true
+}
+
+variable "image_id" {
+  description = "AMI ID for both benchmark nodes"
+  type        = string
+}
+
+variable "client_machine_type" {
+  description = "EC2 instance type for the client node"
+  type        = string
+}
+
+variable "server_machine_type" {
+  description = "EC2 instance type for the server node"
+  type        = string
+}
+
+variable "client_availability_zone" {
+  description = "AWS availability zone for the client node"
+  type        = string
+}
+
+variable "server_availability_zone" {
+  description = "AWS availability zone for the server node"
+  type        = string
+}
+
+variable "client_private_ip_host" {
+  description = "Host index in the client subnet CIDR for the client private IP"
+  type        = number
+  default     = 10
+}
+
+variable "server_private_ip_host" {
+  description = "Host index in the server subnet CIDR for the server private IP"
+  type        = number
+  default     = 20
+}
+
+variable "root_volume_size_gib" {
+  description = "Root volume size in GiB"
+  type        = number
+  default     = 30
+}
+
+variable "root_volume_type" {
+  description = "Root EBS volume type"
+  type        = string
+  default     = "gp3"
+}
+
+variable "root_volume_performance_class" {
+  description = "Compatibility placeholder for the shared network runner. AWS uses root_volume_type instead."
+  type        = string
+  default     = ""
+}
+
+variable "instance_affinity" {
+  description = "Compatibility placeholder for the shared network runner. AWS placement support is added separately."
+  type        = string
+  default     = "none"
+
+  validation {
+    condition     = contains(["none", "co-located", "different-host"], var.instance_affinity)
+    error_message = "instance_affinity must be one of: none, co-located, different-host"
+  }
+}
