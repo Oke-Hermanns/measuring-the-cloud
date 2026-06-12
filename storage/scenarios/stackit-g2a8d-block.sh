@@ -1,15 +1,5 @@
-SCENARIO_NAME=stackit-g2a8d-block-standard
-PROVIDER=stackit
-TOFU_DIR=storage/infra/stackit
-TFVARS_FILE=storage/scenarios/stackit-baseline.tfvars
-BENCHMARK_DIR=storage/benchmarks/full
-OS_TUNING=standard
-BENCHMARK_MACHINE_TYPE=g2a.8d
-BENCHMARK_IMAGE_ID=7b10e105-295b-4369-b6e0-567ec940a02b
-BLOCK_VOLUME_SIZE_GIB=100
-BLOCK_VOLUME_PERFORMANCE_CLASS=storage_premium_perf12
-LOCAL_FILESYSTEM=xfs
-BLOCK_FILESYSTEM=ext4
-BENCHMARK_ROOT_VOLUME_SIZE_GIB=30
-BENCHMARK_ROOT_VOLUME_PERFORMANCE_CLASS=""
-SKIP=0
+#!/usr/bin/env bash
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/stackit/g2a8d-block.sh"
+if [[ -f storage/scenarios/stackit-baseline.tfvars ]]; then
+  TFVARS_FILE=storage/scenarios/stackit-baseline.tfvars
+fi

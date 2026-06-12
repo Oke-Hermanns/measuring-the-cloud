@@ -1,10 +1,12 @@
 # AWS Storage Scenarios
 
-These scenarios reuse `storage/scenarios/aws-baseline.tfvars` for account,
+These scenarios reuse `storage/scenarios/aws/baseline.tfvars` for account,
 region, SSH, and networking settings.
 
-- `aws_c6i.large_ebs-gp3_standard.sh` benchmarks an attached gp3 EBS volume.
-- `aws_i4i.large_local_standard.sh` benchmarks AWS instance-store NVMe storage.
+- `block-storage/` benchmarks attached gp3 EBS profiles.
+- `local-storage/` benchmarks AWS instance-store NVMe storage.
+- `postgresql-wal/` benchmarks WAL-shaped storage profiles.
+- `all/` contains the broader AWS block-storage matrix.
 
-Copy `storage/scenarios/aws-baseline.tfvars.example` to
-`storage/scenarios/aws-baseline.tfvars` before running real infrastructure.
+Copy `storage/scenarios/aws/baseline.tfvars.example` to
+`storage/scenarios/aws/baseline.tfvars` before running real infrastructure.

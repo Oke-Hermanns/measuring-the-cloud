@@ -59,7 +59,7 @@ if [[ -n "$SCENARIO_DIR" ]]; then
 fi
 
 if [[ "${#SCENARIO_FILES[@]}" -eq 0 ]]; then
-  SCENARIO_FILES+=("network/scenarios/stackit-baseline.sh")
+  SCENARIO_FILES+=("network/scenarios/stackit/baseline.sh")
 fi
 
 run_scenario() {

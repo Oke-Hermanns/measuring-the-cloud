@@ -59,7 +59,7 @@ if [[ -n "$SCENARIO_DIR" ]]; then
 fi
 
 if [[ "${#SCENARIO_FILES[@]}" -eq 0 ]]; then
-  SCENARIO_FILES+=("storage/scenarios/stackit-g2a30d-block.sh")
+  SCENARIO_FILES+=("storage/scenarios/stackit/g2a30d-block.sh")
 fi
 
 run_scenario() {
@@ -67,7 +67,7 @@ run_scenario() {
   scenario_file="$(abs_path "$scenario_file")"
   require_file "$scenario_file"
 
-  unset SCENARIO_NAME PROVIDER TOFU_DIR TFVARS_FILE BENCHMARK_DIR OS_TUNING BENCHMARK_MACHINE_TYPE BENCHMARK_IMAGE_ID BLOCK_VOLUME_SIZE_GIB BLOCK_VOLUME_PERFORMANCE_CLASS LOCAL_FILESYSTEM BLOCK_FILESYSTEM BENCHMARK_ROOT_VOLUME_SIZE_GIB BENCHMARK_ROOT_VOLUME_PERFORMANCE_CLASS SKIP SKIP_REASON
+  unset SCENARIO_NAME PROVIDER TOFU_DIR TFVARS_FILE BENCHMARK_DIR OS_TUNING BENCHMARK_MACHINE_TYPE BENCHMARK_IMAGE_ID BLOCK_VOLUME_SIZE_GIB BLOCK_VOLUME_PERFORMANCE_CLASS BLOCK_VOLUME_TYPE BLOCK_VOLUME_IOPS BLOCK_VOLUME_THROUGHPUT_MBPS LOCAL_FILESYSTEM BLOCK_FILESYSTEM BENCHMARK_ROOT_VOLUME_SIZE_GIB BENCHMARK_ROOT_VOLUME_PERFORMANCE_CLASS SKIP SKIP_REASON
   # shellcheck disable=SC1090
   source "$scenario_file"
 
@@ -101,6 +101,9 @@ run_scenario() {
   [[ -n "${BENCHMARK_IMAGE_ID:-}" ]] || die "${scenario_file}: BENCHMARK_IMAGE_ID is required"
   BLOCK_VOLUME_SIZE_GIB="${BLOCK_VOLUME_SIZE_GIB:-0}"
   BLOCK_VOLUME_PERFORMANCE_CLASS="${BLOCK_VOLUME_PERFORMANCE_CLASS:-}"
+  BLOCK_VOLUME_TYPE="${BLOCK_VOLUME_TYPE:-}"
+  BLOCK_VOLUME_IOPS="${BLOCK_VOLUME_IOPS:-}"
+  BLOCK_VOLUME_THROUGHPUT_MBPS="${BLOCK_VOLUME_THROUGHPUT_MBPS:-}"
   LOCAL_FILESYSTEM="${LOCAL_FILESYSTEM:-xfs}"
   BLOCK_FILESYSTEM="${BLOCK_FILESYSTEM:-ext4}"
   case "$LOCAL_FILESYSTEM" in
@@ -140,6 +143,9 @@ run_scenario() {
     echo "  benchmark_image_id=${BENCHMARK_IMAGE_ID}"
     echo "  block_volume_size_gib=${BLOCK_VOLUME_SIZE_GIB}"
     [[ -n "$BLOCK_VOLUME_PERFORMANCE_CLASS" ]] && echo "  block_volume_performance_class=${BLOCK_VOLUME_PERFORMANCE_CLASS}"
+    [[ -n "$BLOCK_VOLUME_TYPE" ]] && echo "  block_volume_type=${BLOCK_VOLUME_TYPE}"
+    [[ -n "$BLOCK_VOLUME_IOPS" ]] && echo "  block_volume_iops=${BLOCK_VOLUME_IOPS}"
+    [[ -n "$BLOCK_VOLUME_THROUGHPUT_MBPS" ]] && echo "  block_volume_throughput_mbps=${BLOCK_VOLUME_THROUGHPUT_MBPS}"
     echo "  local_filesystem=${LOCAL_FILESYSTEM}"
     echo "  block_filesystem=${BLOCK_FILESYSTEM}"
     echo "  access_mode=${ACCESS_MODE}"
@@ -169,6 +175,9 @@ run_scenario() {
   apply_tfvar_overlay "$merged_tfvars" "benchmark_image_id" "\"${BENCHMARK_IMAGE_ID}\""
   apply_tfvar_overlay "$merged_tfvars" "benchmark_block_volume_size_gib" "${BLOCK_VOLUME_SIZE_GIB}"
   apply_tfvar_overlay "$merged_tfvars" "benchmark_block_volume_performance_class" "\"${BLOCK_VOLUME_PERFORMANCE_CLASS}\""
+  [[ -n "$BLOCK_VOLUME_TYPE" ]] && apply_tfvar_overlay "$merged_tfvars" "benchmark_block_volume_type" "\"${BLOCK_VOLUME_TYPE}\""
+  [[ -n "$BLOCK_VOLUME_IOPS" ]] && apply_tfvar_overlay "$merged_tfvars" "benchmark_block_volume_iops" "${BLOCK_VOLUME_IOPS}"
+  [[ -n "$BLOCK_VOLUME_THROUGHPUT_MBPS" ]] && apply_tfvar_overlay "$merged_tfvars" "benchmark_block_volume_throughput_mbps" "${BLOCK_VOLUME_THROUGHPUT_MBPS}"
   apply_tfvar_overlay "$merged_tfvars" "benchmark_local_filesystem" "\"${LOCAL_FILESYSTEM}\""
   apply_tfvar_overlay "$merged_tfvars" "benchmark_block_filesystem" "\"${BLOCK_FILESYSTEM}\""
   apply_tfvar_overlay "$merged_tfvars" "benchmark_root_volume_size_gib" "${BENCHMARK_ROOT_VOLUME_SIZE_GIB}"

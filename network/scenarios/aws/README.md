@@ -5,7 +5,7 @@ Focused AWS scenarios for validating EC2 network placement behavior.
 Copy and edit the shared AWS baseline tfvars before running:
 
 ```bash
-cp network/scenarios/aws-baseline.tfvars.example network/scenarios/aws-baseline.tfvars
+cp network/scenarios/aws/baseline.tfvars.example network/scenarios/aws/baseline.tfvars
 ```
 
 Current placement mapping:

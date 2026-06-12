@@ -1,15 +1,5 @@
-SCENARIO_NAME=aws-baseline
-PROVIDER=aws
-TOFU_DIR=storage/infra/aws
-TFVARS_FILE=storage/scenarios/aws-baseline.tfvars
-BENCHMARK_DIR=storage/benchmarks/baseline
-OS_TUNING=standard
-
-BENCHMARK_MACHINE_TYPE=c6i.large
-BENCHMARK_IMAGE_ID=ami-04baa57774212d79f
-BENCHMARK_ROOT_VOLUME_SIZE_GIB=30
-BENCHMARK_ROOT_VOLUME_PERFORMANCE_CLASS=""
-BLOCK_VOLUME_SIZE_GIB=100
-BLOCK_VOLUME_PERFORMANCE_CLASS=""
-LOCAL_FILESYSTEM=xfs
-BLOCK_FILESYSTEM=ext4
+#!/usr/bin/env bash
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/aws/baseline.sh"
+if [[ -f storage/scenarios/aws-baseline.tfvars ]]; then
+  TFVARS_FILE=storage/scenarios/aws-baseline.tfvars
+fi

@@ -14,22 +14,22 @@ used, the storage VM is controlled over private IPs only.
 Copy and edit the shared baseline tfvars:
 
 ```bash
-cp storage/scenarios/stackit-baseline.tfvars.example \
-  storage/scenarios/stackit-baseline.tfvars
+cp storage/scenarios/stackit/baseline.tfvars.example \
+  storage/scenarios/stackit/baseline.tfvars
 ```
 
 For AWS, copy and edit the AWS baseline tfvars:
 
 ```bash
-cp storage/scenarios/aws-baseline.tfvars.example \
-  storage/scenarios/aws-baseline.tfvars
+cp storage/scenarios/aws/baseline.tfvars.example \
+  storage/scenarios/aws/baseline.tfvars
 ```
 
 Run one scenario locally:
 
 ```bash
 ./storage/runner.sh \
-  --scenario storage/scenarios/all/stackit_g2a.30d_storage_premium_perf6_standard.sh \
+  --scenario storage/scenarios/stackit/all/stackit_g2a.30d_storage_premium_perf6_standard.sh \
   --destroy always
 ```
 
@@ -37,12 +37,12 @@ Run AWS EBS or instance-store scenarios locally:
 
 ```bash
 ./storage/runner.sh \
-  --scenario storage/scenarios/aws/aws_c6i.large_ebs-gp3_standard.sh \
+  --scenario storage/scenarios/aws/block-storage/aws_c6id.large_ebs-gp3_standard.sh \
   --benchmark fio-randread-4k-q32 \
   --destroy always
 
 ./storage/runner.sh \
-  --scenario storage/scenarios/aws/aws_i4i.large_local_standard.sh \
+  --scenario storage/scenarios/aws/local-storage/aws_c6id.large_local_standard.sh \
   --benchmark fio-randread-4k-q32 \
   --destroy always
 ```
@@ -53,13 +53,13 @@ Run it through the shared runner:
 ./scripts/provision_runner.sh \
   --service-account-json /path/to/stackit-service-account.json \
   --workload storage \
-  --scenario-dir storage/scenarios/all
+  --scenario-dir storage/scenarios/stackit/all
 ```
 
-Scenario folders under `storage/scenarios/` group explicit scenario files by
-intent. Some folders run broad matrices, while others contain focused subsets
-such as block-only or local-only storage. See each folder's README for the
-current scope of that folder.
+Scenario folders under `storage/scenarios/` are organized provider-first, then
+by intent. Some folders run broad matrices, while others contain focused
+subsets such as block-only or local-only storage. See each folder's README for
+the current scope of that folder.
 
 The default benchmark suite is:
 
@@ -92,7 +92,7 @@ Storage scenarios are shell files and may define:
 SCENARIO_NAME=stackit_g2a.30d_storage_premium_perf6_standard
 PROVIDER=stackit
 TOFU_DIR=storage/infra/stackit
-TFVARS_FILE=storage/scenarios/stackit-baseline.tfvars
+TFVARS_FILE=storage/scenarios/stackit/baseline.tfvars
 BENCHMARK_DIR=storage/benchmarks/full
 OS_TUNING=standard
 BENCHMARK_MACHINE_TYPE=g2a.30d
@@ -112,6 +112,23 @@ root volume is still provisioned as the VM boot disk.
 the scenario contract. Supported values are `ext4` and `xfs`. Defaults preserve
 the historical behavior: local storage uses `xfs`, and attached block storage
 uses `ext4`.
+
+Approximate block-storage pairings used by the AWS scenario matrix:
+
+```text
+STACKIT storage_premium_perf6   AWS gp3  3000 IOPS /  125 MiB/s
+STACKIT storage_premium_perf12  AWS gp3  6000 IOPS /  250 MiB/s
+STACKIT storage_premium_perf21  AWS gp3 10000 IOPS /  500 MiB/s
+STACKIT storage_premium_perf29  AWS gp3 16000 IOPS / 1000 MiB/s
+```
+
+Approximate instance pairings:
+
+```text
+STACKIT g2a.8d    AWS c6id.2xlarge
+STACKIT g2a.30d   AWS c6id.8xlarge
+STACKIT g2a.120d  AWS c6id.32xlarge
+```
 
 ## Benchmark Contract
 

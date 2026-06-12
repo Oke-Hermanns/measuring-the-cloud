@@ -1,0 +1,17 @@
+# Copy to baseline.tfvars in this directory and adjust for your STACKIT project.
+
+stackit_project_id = "your-project-id"
+stackit_region = "eu01"
+subnet_cidr = "10.66.0.0/24"
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+ssh_private_key_path = "~/.ssh/id_ed25519"
+existing_key_pair_name = ""
+existing_network_id = ""
+existing_security_group_id = ""
+ssh_ingress_cidr = "0.0.0.0/0"
+ipv4_nameservers = ["1.1.1.1", "8.8.8.8"]
+assign_public_ip = true
+
+# Filesystems used when benchmark disks are formatted by cloud-init.
+benchmark_local_filesystem = "xfs"
+benchmark_block_filesystem = "ext4"

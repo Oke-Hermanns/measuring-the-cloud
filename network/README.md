@@ -13,15 +13,15 @@ onto that VM and then executed over private IPs only.
 
 ```bash
 ./network/runner.sh \
-  --scenario network/scenarios/stackit-baseline.sh \
+  --scenario network/scenarios/stackit/baseline.sh \
   --out artifacts/network \
   --destroy always
 ```
 
 The baseline scenarios are `stackit-baseline` and `aws-baseline`. Scenario
-folders under `network/scenarios/` group explicit scenario files by intent and
-are discovered recursively by `--scenario-dir`. See each folder's README for
-the current scope of that folder.
+folders under `network/scenarios/` are organized provider-first, then by
+intent, and are discovered recursively by `--scenario-dir`. See each folder's
+README for the current scope of that folder.
 
 Useful options:
 
@@ -48,7 +48,7 @@ Then provision the runner and launch the benchmark suite on it:
 ```bash
 ./scripts/provision_runner.sh \
   --service-account-json /path/to/stackit-service-account.json \
-  --scenario-dir network/scenarios/all
+  --scenario-dir network/scenarios/stackit/all
 ```
 
 The helper stages only the required repository assets to the runner via
@@ -84,7 +84,7 @@ Scenario files are sourced shell files:
 SCENARIO_NAME=stackit-baseline
 PROVIDER=stackit
 TOFU_DIR=network/infra/stackit
-TFVARS_FILE=network/scenarios/stackit-baseline.tfvars
+TFVARS_FILE=network/scenarios/stackit/baseline.tfvars
 BENCHMARK_DIR=network/benchmarks/full
 PLACEMENT_MODE=single-az
 OS_TUNING=standard
@@ -99,8 +99,8 @@ machine types, availability zones, instance affinity, and OS tuning.
 For AWS, copy the example tfvars before provisioning real infrastructure:
 
 ```bash
-cp network/scenarios/aws-baseline.tfvars.example \
-  network/scenarios/aws-baseline.tfvars
+cp network/scenarios/aws/baseline.tfvars.example \
+  network/scenarios/aws/baseline.tfvars
 ```
 
 AWS credentials are resolved by the AWS provider. Set `aws_profile` in the
@@ -125,6 +125,14 @@ different-host    hard-anti-affinity, force client and server onto different hos
 
 On AWS, `co-located` maps to an EC2 cluster placement group and
 `different-host` maps to a spread placement group.
+
+Approximate instance pairings used by the AWS scenario matrix:
+
+```text
+STACKIT g2a.2d    AWS c6id.large
+STACKIT g2a.8d    AWS c6id.2xlarge
+STACKIT g2a.120d  AWS c6id.32xlarge
+```
 
 ## Benchmark Files
 

@@ -32,7 +32,7 @@ Then provision the runner and start a benchmark run for one scenario file:
 ```bash
 ./scripts/provision_runner.sh \
   --service-account-json /path/to/stackit-service-account.json \
-  --scenario network/scenarios/stackit-baseline.sh
+  --scenario network/scenarios/stackit/baseline.sh
 ```
 
 Or run a scenario folder:
@@ -40,7 +40,7 @@ Or run a scenario folder:
 ```bash
 ./scripts/provision_runner.sh \
   --service-account-json /path/to/stackit-service-account.json \
-  --scenario-dir network/scenarios/all
+  --scenario-dir network/scenarios/stackit/all
 ```
 
 The helper prints a fetch command for the completed run. Use it to pull the
@@ -59,15 +59,15 @@ selected workload. `--workload storage` works the same way.
 The direct local runner is available for ad-hoc execution:
 
 ```bash
-./network/runner.sh --dry-run --scenario network/scenarios/stackit-baseline.sh
-./network/runner.sh --scenario network/scenarios/stackit-baseline.sh --destroy always
+./network/runner.sh --dry-run --scenario network/scenarios/stackit/baseline.sh
+./network/runner.sh --scenario network/scenarios/stackit/baseline.sh --destroy always
 ```
 
 AWS scenarios run through the same local runner path:
 
 ```bash
-./network/runner.sh --dry-run --scenario network/scenarios/aws-baseline.sh
-./storage/runner.sh --dry-run --scenario-dir storage/scenarios/aws
+./network/runner.sh --dry-run --scenario network/scenarios/aws/baseline.sh
+./storage/runner.sh --dry-run --scenario-dir storage/scenarios/aws/all
 ```
 
 Artifacts are downloaded to:
@@ -90,7 +90,7 @@ Typical network scenario variables:
 SCENARIO_NAME=stackit-baseline
 PROVIDER=stackit
 TOFU_DIR=network/infra/stackit
-TFVARS_FILE=network/scenarios/stackit-baseline.tfvars
+TFVARS_FILE=network/scenarios/stackit/baseline.tfvars
 BENCHMARK_DIR=network/benchmarks/baseline
 ```
 
@@ -100,7 +100,7 @@ Typical storage scenario variables:
 SCENARIO_NAME=stackit_g2a.30d_storage_premium_perf6_standard
 PROVIDER=stackit
 TOFU_DIR=storage/infra/stackit
-TFVARS_FILE=storage/scenarios/stackit-baseline.tfvars
+TFVARS_FILE=storage/scenarios/stackit/baseline.tfvars
 BENCHMARK_DIR=storage/benchmarks/full
 ```
 

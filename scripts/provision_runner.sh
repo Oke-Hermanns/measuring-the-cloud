@@ -82,7 +82,7 @@ if [[ -n "$SCENARIO_DIR" ]]; then
 fi
 
 if [[ "${#SCENARIO_FILES[@]}" -eq 0 ]]; then
-  SCENARIO_FILES+=("network/scenarios/stackit-baseline.sh")
+  SCENARIO_FILES+=("network/scenarios/stackit/baseline.sh")
 fi
 
 if [[ -z "$WORKLOAD" ]]; then
@@ -236,7 +236,7 @@ runner_ssh "$RUNNER_PUBLIC_IP" "chmod 600 '${RUNNER_WORKDIR}/state/stackit-servi
 REMOTE_BENCH_KEY="${RUNNER_WORKDIR}/state/benchmark_ssh_key"
 runner_ssh "$RUNNER_PUBLIC_IP" "if [[ ! -f '${REMOTE_BENCH_KEY}' ]]; then ssh-keygen -t ed25519 -N '' -f '${REMOTE_BENCH_KEY}' >/dev/null; fi; chmod 600 '${REMOTE_BENCH_KEY}' '${REMOTE_BENCH_KEY}.pub'"
 
-REMOTE_BASELINE_TFVARS="${RUNNER_WORKDIR}/${WORKLOAD}/scenarios/stackit-baseline.tfvars"
+REMOTE_BASELINE_TFVARS="${RUNNER_WORKDIR}/${WORKLOAD}/scenarios/stackit/baseline.tfvars"
 REMOTE_SSH_INGRESS_CIDR="${RUNNER_PUBLIC_IP}/32"
 
 tmp_tfvars="$(mktemp /tmp/cloud-measuring-runner-baseline.XXXXXX.tfvars)"
