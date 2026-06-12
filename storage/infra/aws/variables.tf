@@ -114,6 +114,17 @@ variable "benchmark_local_mount_point" {
   default     = "/mnt/local"
 }
 
+variable "benchmark_local_filesystem" {
+  description = "Filesystem for AWS instance-store local storage"
+  type        = string
+  default     = "xfs"
+
+  validation {
+    condition     = contains(["ext4", "xfs"], var.benchmark_local_filesystem)
+    error_message = "benchmark_local_filesystem must be one of: ext4, xfs."
+  }
+}
+
 variable "benchmark_block_volume_size_gib" {
   description = "Attached EBS volume size in GiB. Set to 0 to disable the block target."
   type        = number
@@ -159,6 +170,17 @@ variable "benchmark_block_mount_point" {
   description = "Mount point for attached EBS block storage"
   type        = string
   default     = "/mnt/block"
+}
+
+variable "benchmark_block_filesystem" {
+  description = "Filesystem for attached EBS block storage"
+  type        = string
+  default     = "ext4"
+
+  validation {
+    condition     = contains(["ext4", "xfs"], var.benchmark_block_filesystem)
+    error_message = "benchmark_block_filesystem must be one of: ext4, xfs."
+  }
 }
 
 variable "benchmark_storage_env_path" {

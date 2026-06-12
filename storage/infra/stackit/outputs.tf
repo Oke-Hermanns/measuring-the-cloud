@@ -50,6 +50,14 @@ output "benchmark_block_volume_size_gib" {
   value = var.benchmark_block_volume_size_gib
 }
 
+output "benchmark_local_filesystem" {
+  value = var.benchmark_local_filesystem
+}
+
+output "benchmark_block_filesystem" {
+  value = var.benchmark_block_filesystem
+}
+
 output "benchmark_root_volume_size_gib" {
   value = var.benchmark_root_volume_size_gib
 }

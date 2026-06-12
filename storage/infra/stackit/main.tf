@@ -155,6 +155,8 @@ resource "stackit_server" "benchmark" {
     benchmark_block_volume_size_gib = var.benchmark_block_volume_size_gib
     benchmark_local_mount_point     = var.benchmark_local_mount_point
     benchmark_block_mount_point     = var.benchmark_block_mount_point
+    benchmark_local_filesystem      = var.benchmark_local_filesystem
+    benchmark_block_filesystem      = var.benchmark_block_filesystem
     benchmark_storage_env_path      = var.benchmark_storage_env_path
   })
   labels = merge(local.labels, {

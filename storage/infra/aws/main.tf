@@ -162,9 +162,11 @@ resource "aws_instance" "benchmark" {
   user_data = templatefile("${path.module}/templates/user_data.sh.tftpl", {
     benchmark_local_storage         = var.benchmark_local_storage
     benchmark_local_mount_point     = var.benchmark_local_mount_point
+    benchmark_local_filesystem      = var.benchmark_local_filesystem
     benchmark_block_volume_size_gib = var.benchmark_block_volume_size_gib
     benchmark_block_volume_id       = var.benchmark_block_volume_size_gib > 0 ? aws_ebs_volume.block[0].id : ""
     benchmark_block_mount_point     = var.benchmark_block_mount_point
+    benchmark_block_filesystem      = var.benchmark_block_filesystem
     benchmark_storage_env_path      = var.benchmark_storage_env_path
   })
 

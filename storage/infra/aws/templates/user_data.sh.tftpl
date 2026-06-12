@@ -194,9 +194,11 @@ wait_for_ebs_volume() {
 storage_targets=()
 local_storage="${benchmark_local_storage}"
 local_mount_point="${benchmark_local_mount_point}"
+local_filesystem="${benchmark_local_filesystem}"
 block_volume_size_gib="${benchmark_block_volume_size_gib}"
 block_volume_id="${benchmark_block_volume_id}"
 block_mount_point="${benchmark_block_mount_point}"
+block_filesystem="${benchmark_block_filesystem}"
 storage_env_path="${benchmark_storage_env_path}"
 
 local_device=""
@@ -208,7 +210,7 @@ if [[ "$${local_storage}" == "auto" ]]; then
   if [[ -n "$${local_device}" ]]; then
     log "preparing AWS instance-store device $${local_device} ($(disk_size_gib "$${local_device}") GiB)"
     unmount_disk_mountpoints "$${local_device}"
-    prepare_mount "$${local_device}" "$${local_mount_point}" "xfs"
+    prepare_mount "$${local_device}" "$${local_mount_point}" "$${local_filesystem}"
     storage_targets+=("local")
   else
     log "no AWS instance-store device was discovered"
@@ -223,7 +225,7 @@ if [[ "$${block_volume_size_gib}" =~ ^[0-9]+$ ]] && (( block_volume_size_gib > 0
   if [[ -n "$${block_device}" ]]; then
     log "preparing AWS EBS block-volume device $${block_device} ($(disk_size_gib "$${block_device}") GiB) for volume $${block_volume_id}"
     unmount_disk_mountpoints "$${block_device}"
-    prepare_mount "$${block_device}" "$${block_mount_point}" "ext4"
+    prepare_mount "$${block_device}" "$${block_mount_point}" "$${block_filesystem}"
     storage_targets+=("block")
   else
     log "no EBS block volume device was discovered for volume $${block_volume_id}"
@@ -236,8 +238,10 @@ mkdir -p "$(dirname "$${storage_env_path}")"
   echo "export STORAGE_ROOT_DEVICE=$(printf '%q' "$(root_disk)")"
   [[ -n "$${local_device}" ]] && echo "export STORAGE_LOCAL_DEVICE=$(printf '%q' "$${local_device}")"
   [[ -n "$${local_device}" ]] && echo "export STORAGE_LOCAL_MOUNT=$(printf '%q' "$${local_mount_point}")"
+  [[ -n "$${local_device}" ]] && echo "export STORAGE_LOCAL_FILESYSTEM=$(printf '%q' "$${local_filesystem}")"
   [[ -n "$${block_device}" ]] && echo "export STORAGE_BLOCK_DEVICE=$(printf '%q' "$${block_device}")"
   [[ -n "$${block_device}" ]] && echo "export STORAGE_BLOCK_MOUNT=$(printf '%q' "$${block_mount_point}")"
+  [[ -n "$${block_device}" ]] && echo "export STORAGE_BLOCK_FILESYSTEM=$(printf '%q' "$${block_filesystem}")"
 } >"$${storage_env_path}"
 chown ubuntu:ubuntu "$${storage_env_path}"
 

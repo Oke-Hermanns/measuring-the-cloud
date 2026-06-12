@@ -5,9 +5,9 @@ available storage targets on that VM, runs `fio` benchmark files on the
 discovered targets, fetches the raw artifacts, and then destroys the
 infrastructure according to the selected destroy policy.
 
-The current supported cloud path is STACKIT plus the shared persistent runner
-foundation in `infra/stackit-runner/`. When the runner is used, the storage VM
-is controlled over private IPs only.
+The supported cloud paths are STACKIT and AWS. STACKIT can also use the shared
+persistent runner foundation in `infra/stackit-runner/`; when that runner is
+used, the storage VM is controlled over private IPs only.
 
 ## Quick Start
 
@@ -18,11 +18,32 @@ cp storage/scenarios/stackit-baseline.tfvars.example \
   storage/scenarios/stackit-baseline.tfvars
 ```
 
+For AWS, copy and edit the AWS baseline tfvars:
+
+```bash
+cp storage/scenarios/aws-baseline.tfvars.example \
+  storage/scenarios/aws-baseline.tfvars
+```
+
 Run one scenario locally:
 
 ```bash
 ./storage/runner.sh \
   --scenario storage/scenarios/all/stackit_g2a.30d_storage_premium_perf6_standard.sh \
+  --destroy always
+```
+
+Run AWS EBS or instance-store scenarios locally:
+
+```bash
+./storage/runner.sh \
+  --scenario storage/scenarios/aws/aws_c6i.large_ebs-gp3_standard.sh \
+  --benchmark fio-randread-4k-q32 \
+  --destroy always
+
+./storage/runner.sh \
+  --scenario storage/scenarios/aws/aws_i4i.large_local_standard.sh \
+  --benchmark fio-randread-4k-q32 \
   --destroy always
 ```
 
@@ -59,6 +80,10 @@ the local disk is identified by the `ephemeral0` filesystem label and the
 attached block volume by its device identity/serial, with size used only as a
 fallback if metadata is incomplete.
 
+On AWS, attached EBS volumes are discovered by EBS volume id through NVMe
+by-id links. Instance-store NVMe disks are discovered by the AWS instance-store
+device model and exposed as the `local` target.
+
 ## Scenario Contract
 
 Storage scenarios are shell files and may define:
@@ -74,12 +99,19 @@ BENCHMARK_MACHINE_TYPE=g2a.30d
 BENCHMARK_IMAGE_ID=7b10e105-295b-4369-b6e0-567ec940a02b
 BLOCK_VOLUME_SIZE_GIB=300
 BLOCK_VOLUME_PERFORMANCE_CLASS=storage_premium_perf6
+LOCAL_FILESYSTEM=xfs
+BLOCK_FILESYSTEM=ext4
 SKIP=0
 ```
 
 `SKIP=1` skips a whole scenario during discovery and dry-run reporting.
 `BLOCK_VOLUME_SIZE_GIB=0` disables the additional benchmark block volume; the
 root volume is still provisioned as the VM boot disk.
+
+`LOCAL_FILESYSTEM` and `BLOCK_FILESYSTEM` make the formatted filesystem part of
+the scenario contract. Supported values are `ext4` and `xfs`. Defaults preserve
+the historical behavior: local storage uses `xfs`, and attached block storage
+uses `ext4`.
 
 ## Benchmark Contract
 
@@ -115,3 +147,5 @@ For the `psync` latency profiles, use the same shape with
 The runner automatically wraps the command with `taskset`, uses all CPUs
 except CPU 0 when possible, and skips the root volume. Storage targets are
 discovered from the benchmark VM and written to a small env file on the host.
+The selected target filesystem is copied into `storage.env`, `scenario.env`,
+and each benchmark's `benchmark.env`.

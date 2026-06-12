@@ -2,8 +2,9 @@
 
 Lean benchmark framework for comparing cloud network and storage performance.
 
-The current implemented slices are STACKIT network and storage benchmarks,
-both using a persistent benchmark runner VM for private-IP execution:
+The current implemented slices are STACKIT and AWS network and storage
+benchmarks. STACKIT also has a persistent benchmark runner VM path for
+private-IP execution:
 
 - provision a small runner VM plus shared network/security plumbing with
   OpenTofu
@@ -15,9 +16,8 @@ both using a persistent benchmark runner VM for private-IP execution:
 - fetch raw artifacts back from the runner
 - destroy infrastructure to control cost
 
-The storage slice follows the same runner model but uses one benchmark VM per
-scenario, with `fio` workloads over discovered local and/or attached block
-storage targets.
+The storage slice uses one benchmark VM per scenario, with `fio` workloads over
+discovered local and/or attached block storage targets.
 
 ## Quick Start
 
@@ -56,11 +56,18 @@ results back to your workstation once the run has finished:
 If you omit `--run-id`, the helper fetches the latest completed run for the
 selected workload. `--workload storage` works the same way.
 
-The direct local runner is still available for ad-hoc execution:
+The direct local runner is available for ad-hoc execution:
 
 ```bash
 ./network/runner.sh --dry-run --scenario network/scenarios/stackit-baseline.sh
 ./network/runner.sh --scenario network/scenarios/stackit-baseline.sh --destroy always
+```
+
+AWS scenarios run through the same local runner path:
+
+```bash
+./network/runner.sh --dry-run --scenario network/scenarios/aws-baseline.sh
+./storage/runner.sh --dry-run --scenario-dir storage/scenarios/aws
 ```
 
 Artifacts are downloaded to:
@@ -99,9 +106,17 @@ BENCHMARK_DIR=storage/benchmarks/full
 
 The selected scenario file can override cloud dimensions such as instance type,
 availability zone, OS tuning, affinity, root volume size, or attached block
-volume performance class.
+volume performance class. Storage scenarios can also set
+`LOCAL_FILESYSTEM` and `BLOCK_FILESYSTEM` to make target filesystems explicit;
+both support `ext4` and `xfs`.
 
 Set `SKIP=1` to keep a scenario file in the directory without running it.
+
+## OpenTofu Files
+
+Track `.terraform.lock.hcl` files for root modules so provider versions are
+stable across machines and CI. Do not track `.terraform/`, `*.tfstate`, or real
+`*.tfvars` files; scenario tfvars examples are safe to track.
 
 ## Benchmark Files
 

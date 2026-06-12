@@ -18,10 +18,10 @@ onto that VM and then executed over private IPs only.
   --destroy always
 ```
 
-The baseline scenario is `stackit-baseline`. Scenario folders under
-`network/scenarios/` group explicit scenario files by intent and are discovered
-recursively by `--scenario-dir`. See each folder's README for the current
-scope of that folder.
+The baseline scenarios are `stackit-baseline` and `aws-baseline`. Scenario
+folders under `network/scenarios/` group explicit scenario files by intent and
+are discovered recursively by `--scenario-dir`. See each folder's README for
+the current scope of that folder.
 
 Useful options:
 
@@ -96,6 +96,17 @@ The concrete cloud setup starts from the referenced tfvars file. The runner
 overlays scenario-specific values before provisioning, such as client/server
 machine types, availability zones, instance affinity, and OS tuning.
 
+For AWS, copy the example tfvars before provisioning real infrastructure:
+
+```bash
+cp network/scenarios/aws-baseline.tfvars.example \
+  network/scenarios/aws-baseline.tfvars
+```
+
+AWS credentials are resolved by the AWS provider. Set `aws_profile` in the
+tfvars file, leave it empty to use environment credentials, or use the standard
+AWS credential chain.
+
 Supported OS tuning profiles:
 
 ```text
@@ -111,6 +122,9 @@ none              provider default placement
 co-located        hard-affinity, keep the client and server on the same host
 different-host    hard-anti-affinity, force client and server onto different hosts
 ```
+
+On AWS, `co-located` maps to an EC2 cluster placement group and
+`different-host` maps to a spread placement group.
 
 ## Benchmark Files
 

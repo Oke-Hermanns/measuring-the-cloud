@@ -252,7 +252,7 @@ discover_storage_env() {
 write_remote_metadata() {
   local tmp
   tmp="$(mktemp /tmp/cloud-measuring-storage-scenario.XXXXXX.env)"
-  write_env_file "$tmp" RUN_ID SCENARIO_NAME OS_TUNING ACCESS_MODE BENCHMARK_HOST BENCHMARK_PRIVATE_IP SSH_USER BENCHMARK_CPU_LIST BENCHMARK_MACHINE_TYPE BENCHMARK_AVAILABILITY_ZONE STORAGE_TARGETS STORAGE_ROOT_DEVICE STORAGE_LOCAL_DEVICE STORAGE_LOCAL_MOUNT STORAGE_BLOCK_DEVICE STORAGE_BLOCK_MOUNT
+  write_env_file "$tmp" RUN_ID SCENARIO_NAME OS_TUNING ACCESS_MODE BENCHMARK_HOST BENCHMARK_PRIVATE_IP SSH_USER BENCHMARK_CPU_LIST BENCHMARK_MACHINE_TYPE BENCHMARK_AVAILABILITY_ZONE STORAGE_TARGETS STORAGE_ROOT_DEVICE STORAGE_LOCAL_DEVICE STORAGE_LOCAL_MOUNT STORAGE_LOCAL_FILESYSTEM STORAGE_BLOCK_DEVICE STORAGE_BLOCK_MOUNT STORAGE_BLOCK_FILESYSTEM
   scp_to "$tmp" "$BENCHMARK_HOST" "${REMOTE_SCENARIO_DIR}/scenario.env"
   rm -f "$tmp"
 
@@ -266,12 +266,13 @@ write_benchmark_env() {
   local target_name="$2"
   local target_mount="$3"
   local target_device="$4"
+  local target_filesystem="$5"
   local tmp
   ssh_run "$BENCHMARK_HOST" "mkdir -p '${remote_target_dir}'"
   tmp="$(mktemp /tmp/cloud-measuring-storage-benchmark.XXXXXX.env)"
   write_env_file "$tmp" \
     BENCHMARK_NAME BENCHMARK_TOOL REPETITIONS COOLDOWN_SEC OS_TUNING BENCHMARK_CPU_LIST \
-    STORAGE_TARGET_NAME STORAGE_TARGET_MOUNT STORAGE_TARGET_DEVICE \
+    STORAGE_TARGET_NAME STORAGE_TARGET_MOUNT STORAGE_TARGET_DEVICE STORAGE_TARGET_FILESYSTEM \
     FIO_IOENGINE FIO_RW FIO_BS FIO_IODEPTH FIO_NUMJOBS FIO_RUNTIME_SEC FIO_DIRECT FIO_GROUP_REPORTING FIO_TIME_BASED FIO_SIZE
   scp_to "$tmp" "$BENCHMARK_HOST" "${remote_target_dir}/benchmark.env"
   rm -f "$tmp"
@@ -315,7 +316,12 @@ run_repetitions() {
   local target_name="$2"
   local target_mount="$3"
   local target_device="$4"
-  write_benchmark_env "$remote_target_dir" "$target_name" "$target_mount" "$target_device"
+  local target_filesystem="$5"
+  STORAGE_TARGET_NAME="$target_name"
+  STORAGE_TARGET_MOUNT="$target_mount"
+  STORAGE_TARGET_DEVICE="$target_device"
+  STORAGE_TARGET_FILESYSTEM="$target_filesystem"
+  write_benchmark_env "$remote_target_dir" "$target_name" "$target_mount" "$target_device" "$target_filesystem"
   local rep
   for rep in $(seq 1 "$REPETITIONS"); do
     log "running benchmark ${BENCHMARK_NAME} target ${target_name} repetition ${rep}/${REPETITIONS}"
@@ -360,17 +366,21 @@ run_fio_benchmark() {
   local target_name
   local target_mount_var
   local target_device_var
+  local target_filesystem_var
   local target_mount
   local target_device
+  local target_filesystem
 
   for target_name in $STORAGE_TARGETS; do
     target_mount_var="STORAGE_${target_name^^}_MOUNT"
     target_device_var="STORAGE_${target_name^^}_DEVICE"
+    target_filesystem_var="STORAGE_${target_name^^}_FILESYSTEM"
     target_mount="${!target_mount_var:-}"
     target_device="${!target_device_var:-}"
+    target_filesystem="${!target_filesystem_var:-}"
     [[ -n "$target_mount" ]] || continue
     remote_target_dir="${REMOTE_SCENARIO_DIR}/benchmarks/${BENCHMARK_NAME}/${target_name}"
-    run_repetitions "$remote_target_dir" "$target_name" "$target_mount" "$target_device"
+    run_repetitions "$remote_target_dir" "$target_name" "$target_mount" "$target_device" "$target_filesystem"
   done
 }
 

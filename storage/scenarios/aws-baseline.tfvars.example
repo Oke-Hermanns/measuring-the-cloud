@@ -30,8 +30,10 @@ benchmark_root_volume_type     = "gp3"
 # provides them. Use "disabled" to skip local storage preparation.
 benchmark_local_storage     = "auto"
 benchmark_local_mount_point = "/mnt/local"
+benchmark_local_filesystem  = "xfs"
 
 benchmark_block_volume_size_gib        = 100
 benchmark_block_volume_type            = "gp3"
 benchmark_block_volume_iops            = 3000
 benchmark_block_volume_throughput_mbps = 125
+benchmark_block_filesystem             = "ext4"
