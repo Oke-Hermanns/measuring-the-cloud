@@ -7,12 +7,18 @@ params:
 output:
   html_document:
     toc: true
-    toc_depth: 2
+    toc_depth: 3
     code_folding: hide
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 12, fig.height = 7)
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 13,
+  fig.height = 8
+)
 
 rmd_dir <- dirname(normalizePath(knitr::current_input(dir = TRUE)))
 repo_root <- normalizePath(file.path(rmd_dir, "..", ".."))
@@ -49,11 +55,26 @@ DBI::dbExecute(con, sprintf("create table benchmarks as select * from read_csv_a
 DBI::dbExecute(con, sprintf("create table fio as select * from read_csv_auto('%s')", csv_sql_path("storage_fio.csv")))
 DBI::dbExecute(con, sprintf("create table failures as select * from read_csv_auto('%s')", csv_sql_path("storage_failures.csv")))
 
+merge_lists <- function(base, overrides) {
+  if (is.null(overrides) || length(overrides) == 0) return(base)
+  out <- base
+  for (name in names(overrides)) out[[name]] <- overrides[[name]]
+  out
+}
+
+as_char_vec <- function(x) {
+  if (is.null(x) || length(x) == 0) return(character(0))
+  unique(as.character(unlist(x, use.names = FALSE)))
+}
+
 default_report_config <- list(
-  reference_machine_type = "g2a.120d",
-  instance_comparison_block_performance_class = "storage_premium_perf12",
-  local_instance_comparison_block_performance_class = "storage_premium_perf6",
-  reference_block_performance_class = "storage_premium_perf29",
+  reference_machine_type = NULL,
+  instance_comparison_block_performance_class = NULL,
+  local_instance_comparison_block_performance_class = NULL,
+  reference_block_performance_class = NULL,
+  reference_block_filesystem = NULL,
+  reference_local_filesystem = NULL,
+  reference_os_tuning = "standard",
   local_instance_rw_mode = "randread",
   default_io_engine = "io_uring",
   throughput_block_size = "128k",
@@ -68,14 +89,35 @@ default_report_config <- list(
     iodepth = c(32, 16),
     stringsAsFactors = FALSE
   ),
-  performance_class_machine_types = c("g2a.8d", "g2a.30d", "g2a.120d"),
-  preferred_machine_order = c("g2a.8d", "g2a.30d", "g2a.120d"),
+  preferred_machine_order = c("g2a.8d", "g2a.30d", "g2a.60d", "g2a.120d", "c6id.32xlarge", "c6id.metal"),
   preferred_workload_order = c("randread", "randwrite", "read", "write"),
   preferred_engine_order = c("psync", "io_uring"),
-  preferred_target_order = c("local", "block")
+  preferred_target_order = c("local", "block"),
+  preferred_filesystem_order = c("raw", "xfs", "ext4"),
+  provider_overrides = list(
+    stackit = list(
+      reference_machine_type = "g2a.120d",
+      instance_comparison_block_performance_class = "storage_premium_perf12",
+      local_instance_comparison_block_performance_class = "storage_premium_perf6",
+      reference_block_performance_class = "storage_premium_perf29",
+      reference_block_filesystem = "xfs",
+      reference_local_filesystem = "xfs",
+      reference_os_tuning = "standard",
+      performance_class_machine_types = c("g2a.8d", "g2a.30d", "g2a.60d", "g2a.120d")
+    ),
+    aws = list(
+      reference_machine_type = "c6id.32xlarge",
+      instance_comparison_block_performance_class = "storage_premium_perf29",
+      local_instance_comparison_block_performance_class = "storage_premium_perf29",
+      reference_block_performance_class = "storage_premium_perf29",
+      reference_block_filesystem = "xfs",
+      reference_local_filesystem = "xfs",
+      reference_os_tuning = "standard",
+      performance_class_machine_types = c("c6id.32xlarge", "c6id.metal")
+    )
+  )
 )
 
-configured_keys <- character(0)
 report_config <- default_report_config
 if (!is.null(params$config_file) && nzchar(params$config_file)) {
   config_override <- jsonlite::fromJSON(params$config_file, simplifyDataFrame = TRUE)
@@ -83,116 +125,152 @@ if (!is.null(params$config_file) && nzchar(params$config_file)) {
   if (length(unknown_keys) > 0) {
     stop(sprintf("Unknown storage report config keys: %s", paste(unknown_keys, collapse = ", ")))
   }
-  configured_keys <- names(config_override)
-  report_config[names(config_override)] <- config_override
+  if ("provider_overrides" %in% names(config_override)) {
+    report_config$provider_overrides <- merge_lists(report_config$provider_overrides, config_override$provider_overrides)
+    config_override$provider_overrides <- NULL
+  }
+  report_config <- merge_lists(report_config, config_override)
 }
 
-discover_single <- function(column, current) {
-  if (column %in% configured_keys) return(current)
-  values <- sql(sprintf(
-    "select distinct %s as value from fio where valid_measurement and %s is not null order by 1",
-    column, column
-  ))$value
-  if (length(values) == 1) values[[1]] else current
+quote_sql <- function(x) as.character(DBI::dbQuoteString(con, x))
+
+providers <- sql("
+select distinct provider
+from scenarios
+where provider is not null and provider <> ''
+order by 1
+")$provider
+
+if (length(providers) == 0) {
+  stop("No storage providers were discovered in storage_scenarios.csv")
 }
 
-report_config$reference_machine_type <- discover_single(
-  "benchmark_machine_type", report_config$reference_machine_type
-)
-report_config$instance_comparison_block_performance_class <- discover_single(
-  "block_volume_performance_class", report_config$instance_comparison_block_performance_class
-)
-report_config$local_instance_comparison_block_performance_class <- discover_single(
-  "block_volume_performance_class", report_config$local_instance_comparison_block_performance_class
-)
-report_config$reference_block_performance_class <- discover_single(
-  "block_volume_performance_class", report_config$reference_block_performance_class
-)
-report_config$local_instance_rw_mode <- discover_single(
-  "benchmark_rw_mode", report_config$local_instance_rw_mode
-)
-report_config$throughput_block_size <- discover_single("block_size", report_config$throughput_block_size)
-report_config$iops_latency_block_size <- discover_single("block_size", report_config$iops_latency_block_size)
-
-discover_iodepth <- function(config_key, block_size) {
-  if (config_key %in% configured_keys) return(report_config[[config_key]])
-  values <- sql(sprintf(
-    paste(
-      "select distinct iodepth from fio",
-      "where valid_measurement",
-      "  and io_engine = %s",
-      "  and block_size = %s",
-      "order by 1"
-    ),
-    as.character(DBI::dbQuoteString(con, report_config$default_io_engine)),
-    as.character(DBI::dbQuoteString(con, block_size))
-  ))$iodepth
-  if (length(values) == 1) values[[1]] else report_config[[config_key]]
+provider_label <- function(provider) {
+  switch(
+    provider,
+    aws = "AWS",
+    stackit = "Stackit",
+    provider
+  )
 }
 
-report_config$throughput_iodepth <- discover_iodepth(
-  "throughput_iodepth", report_config$throughput_block_size
-)
-report_config$iops_latency_iodepth <- discover_iodepth(
-  "iops_latency_iodepth", report_config$iops_latency_block_size
-)
-
-if (!("block_size_comparison" %in% configured_keys)) {
-  available_block_sizes <- sql("
-  select distinct block_size, block_size_bytes, iodepth, io_engine
-  from fio
-  where valid_measurement
-  order by block_size_bytes, iodepth
-  ")
-  available_block_sizes <- available_block_sizes[
-    available_block_sizes$io_engine == report_config$default_io_engine,
-    c("block_size", "iodepth"),
-    drop = FALSE
-  ]
-  if (nrow(available_block_sizes) > 0) report_config$block_size_comparison <- unique(available_block_sizes)
+provider_distinct <- function(provider, table_name, column, extra_where = "1=1", order_by = "1") {
+  provider_literal <- quote_sql(provider)
+  sql(glue::glue("
+  select distinct {column} as value
+  from {table_name}
+  where provider = {provider_literal}
+    and {column} is not null
+    and cast({column} as varchar) <> ''
+    and {extra_where}
+  order by {order_by}
+  "))$value
 }
-if (!("performance_class_machine_types" %in% configured_keys)) {
-  available_machine_types <- sql("
-  select distinct benchmark_machine_type
-  from fio
-  where valid_measurement and benchmark_machine_type is not null
-  order by 1
-  ")$benchmark_machine_type
-  report_config$performance_class_machine_types <- unique(c(
-    report_config$preferred_machine_order[
-      report_config$preferred_machine_order %in% available_machine_types
-    ],
-    available_machine_types
+
+resolve_scalar <- function(current, available, preferred = character(0)) {
+  available <- as_char_vec(available)
+  preferred <- as_char_vec(preferred)
+  if (length(available) == 0) return(current)
+  if (!is.null(current) && length(current) == 1 && !is.na(current) && current %in% available) return(current)
+  preferred_hits <- preferred[preferred %in% available]
+  if (length(preferred_hits) > 0) return(preferred_hits[[1]])
+  available[[1]]
+}
+
+resolve_provider_config <- function(provider) {
+  cfg <- report_config
+  provider_override <- report_config$provider_overrides[[provider]]
+  cfg$provider_overrides <- NULL
+  cfg <- merge_lists(cfg, provider_override)
+
+  machine_types <- provider_distinct(provider, "fio", "benchmark_machine_type")
+  perf_classes <- provider_distinct(provider, "fio", "block_volume_performance_class")
+  workloads <- provider_distinct(provider, "fio", "benchmark_rw_mode")
+  engines <- provider_distinct(provider, "fio", "io_engine")
+  targets <- provider_distinct(provider, "fio", "storage_target")
+  filesystems <- provider_distinct(provider, "fio", "storage_target_filesystem")
+  block_filesystems <- provider_distinct(provider, "fio", "storage_target_filesystem", "storage_target = 'block'")
+  local_filesystems <- provider_distinct(provider, "fio", "storage_target_filesystem", "storage_target = 'local'")
+  tunings <- provider_distinct(provider, "fio", "os_tuning")
+
+  cfg$reference_machine_type <- resolve_scalar(
+    cfg$reference_machine_type,
+    machine_types,
+    cfg$preferred_machine_order
+  )
+  cfg$instance_comparison_block_performance_class <- resolve_scalar(
+    cfg$instance_comparison_block_performance_class,
+    perf_classes,
+    perf_classes
+  )
+  cfg$local_instance_comparison_block_performance_class <- resolve_scalar(
+    cfg$local_instance_comparison_block_performance_class,
+    perf_classes,
+    perf_classes
+  )
+  cfg$reference_block_performance_class <- resolve_scalar(
+    cfg$reference_block_performance_class,
+    perf_classes,
+    perf_classes
+  )
+  cfg$reference_block_filesystem <- resolve_scalar(
+    cfg$reference_block_filesystem,
+    block_filesystems,
+    c("xfs", "ext4", "raw")
+  )
+  cfg$reference_local_filesystem <- resolve_scalar(
+    cfg$reference_local_filesystem,
+    local_filesystems,
+    c("xfs", "ext4", "raw")
+  )
+  cfg$reference_os_tuning <- resolve_scalar(
+    cfg$reference_os_tuning,
+    tunings,
+    c("standard", "tuned")
+  )
+  cfg$local_instance_rw_mode <- resolve_scalar(
+    cfg$local_instance_rw_mode,
+    workloads,
+    cfg$preferred_workload_order
+  )
+  cfg$default_io_engine <- resolve_scalar(
+    cfg$default_io_engine,
+    engines,
+    cfg$preferred_engine_order
+  )
+  cfg$performance_class_machine_types <- unique(c(
+    cfg$performance_class_machine_types[cfg$performance_class_machine_types %in% machine_types],
+    machine_types
   ))
+  cfg$machine_levels <- unique(c(
+    cfg$preferred_machine_order[cfg$preferred_machine_order %in% machine_types],
+    machine_types
+  ))
+  cfg$workload_levels <- unique(c(
+    cfg$preferred_workload_order[cfg$preferred_workload_order %in% workloads],
+    workloads
+  ))
+  cfg$engine_levels <- unique(c(
+    cfg$preferred_engine_order[cfg$preferred_engine_order %in% engines],
+    engines
+  ))
+  cfg$target_levels <- unique(c(
+    cfg$preferred_target_order[cfg$preferred_target_order %in% targets],
+    targets
+  ))
+  cfg$filesystem_levels <- unique(c(
+    cfg$preferred_filesystem_order[cfg$preferred_filesystem_order %in% filesystems],
+    filesystems
+  ))
+  cfg
 }
 
-scalar_config <- report_config[!vapply(report_config, is.list, logical(1))]
-scalar_config <- scalar_config[!vapply(scalar_config, function(x) length(x) > 1, logical(1))]
-DBI::dbWriteTable(con, "report_config", as.data.frame(scalar_config, stringsAsFactors = FALSE), overwrite = TRUE)
-DBI::dbWriteTable(con, "report_block_size_comparison", report_config$block_size_comparison, overwrite = TRUE)
+provider_configs <- setNames(lapply(providers, resolve_provider_config), providers)
+block_size_comparison_values_sql <- paste(
+  sprintf("('%s', %s)", report_config$block_size_comparison$block_size, report_config$block_size_comparison$iodepth),
+  collapse = ", "
+)
 
-append_discovered <- function(preferred, discovered) unique(c(preferred, discovered))
-machine_levels <- append_discovered(
-  report_config$preferred_machine_order,
-  sql("select distinct benchmark_machine_type from fio order by 1")$benchmark_machine_type
-)
-workload_levels <- append_discovered(
-  report_config$preferred_workload_order,
-  sql("select distinct benchmark_rw_mode from fio order by 1")$benchmark_rw_mode
-)
-engine_levels <- append_discovered(
-  report_config$preferred_engine_order,
-  sql("select distinct io_engine from fio order by 1")$io_engine
-)
-block_size_levels <- sql("select distinct block_size, block_size_bytes from fio order by block_size_bytes")$block_size
-target_levels <- append_discovered(
-  report_config$preferred_target_order,
-  sql("select distinct storage_target from fio order by 1")$storage_target
-)
-performance_class_machine_label <- function(position) {
-  machines <- report_config$performance_class_machine_types
-  if (length(machines) < position) sprintf("machine slot %d (not configured)", position) else machines[[position]]
-}
 perf_class_order <- sql("
 select distinct block_volume_performance_class
 from scenarios
@@ -201,43 +279,51 @@ order by block_volume_performance_class
 ")$block_volume_performance_class
 perf_class_order <- perf_class_order[order(as.integer(sub(".*perf([0-9]+).*", "\\1", perf_class_order)))]
 
-wrap_subtitle <- function(text, width = 78) {
+apply_factor_levels <- function(df, provider = NULL) {
+  cfg <- if (!is.null(provider)) provider_configs[[provider]] else NULL
+  machine_levels <- if (!is.null(cfg)) cfg$machine_levels else unique(c(
+    report_config$preferred_machine_order,
+    sql("select distinct benchmark_machine_type from fio where benchmark_machine_type is not null order by 1")$benchmark_machine_type
+  ))
+  workload_levels <- if (!is.null(cfg)) cfg$workload_levels else unique(c(
+    report_config$preferred_workload_order,
+    sql("select distinct benchmark_rw_mode from fio where benchmark_rw_mode is not null order by 1")$benchmark_rw_mode
+  ))
+  engine_levels <- if (!is.null(cfg)) cfg$engine_levels else unique(c(
+    report_config$preferred_engine_order,
+    sql("select distinct io_engine from fio where io_engine is not null order by 1")$io_engine
+  ))
+  target_levels <- if (!is.null(cfg)) cfg$target_levels else unique(c(
+    report_config$preferred_target_order,
+    sql("select distinct storage_target from fio where storage_target is not null order by 1")$storage_target
+  ))
+  filesystem_levels <- if (!is.null(cfg)) cfg$filesystem_levels else unique(c(
+    report_config$preferred_filesystem_order,
+    sql("select distinct storage_target_filesystem from fio where storage_target_filesystem is not null order by 1")$storage_target_filesystem
+  ))
+  block_size_levels <- sql("select distinct block_size, block_size_bytes from fio where block_size is not null order by block_size_bytes")$block_size
+
+  if ("benchmark_machine_type" %in% names(df)) df$benchmark_machine_type <- factor(df$benchmark_machine_type, levels = machine_levels)
+  if ("benchmark_rw_mode" %in% names(df)) df$benchmark_rw_mode <- factor(df$benchmark_rw_mode, levels = workload_levels)
+  if ("io_engine" %in% names(df)) df$io_engine <- factor(df$io_engine, levels = engine_levels)
+  if ("storage_target" %in% names(df)) df$storage_target <- factor(df$storage_target, levels = target_levels)
+  if ("storage_target_filesystem" %in% names(df)) df$storage_target_filesystem <- factor(df$storage_target_filesystem, levels = filesystem_levels)
+  if ("block_size" %in% names(df)) df$block_size <- factor(df$block_size, levels = block_size_levels)
+  if ("block_volume_performance_class" %in% names(df)) df$block_volume_performance_class <- factor(df$block_volume_performance_class, levels = perf_class_order)
+  if ("latency_metric" %in% names(df)) df$latency_metric <- factor(df$latency_metric, levels = c("avg", "p50", "p99", "p99.9"))
+  if ("execution_config" %in% names(df)) df$execution_config <- factor(df$execution_config, levels = unique(df$execution_config))
+  df
+}
+
+wrap_subtitle <- function(text, width = 88) {
   if (is.null(text) || !nzchar(text)) return(NULL)
   paste(strwrap(text, width = width), collapse = "\n")
 }
 
-apply_factor_levels <- function(df) {
-  if ("benchmark_machine_type" %in% names(df)) {
-    df$benchmark_machine_type <- factor(df$benchmark_machine_type, levels = machine_levels)
-  }
-  if ("benchmark_rw_mode" %in% names(df)) {
-    df$benchmark_rw_mode <- factor(df$benchmark_rw_mode, levels = workload_levels)
-  }
-  if ("io_engine" %in% names(df)) {
-    df$io_engine <- factor(df$io_engine, levels = engine_levels)
-  }
-  if ("block_size" %in% names(df)) {
-    df$block_size <- factor(df$block_size, levels = block_size_levels)
-  }
-  if ("storage_target" %in% names(df)) {
-    df$storage_target <- factor(df$storage_target, levels = target_levels)
-  }
-  if ("block_volume_performance_class" %in% names(df)) {
-    df$block_volume_performance_class <- factor(df$block_volume_performance_class, levels = perf_class_order)
-  }
-  if ("latency_metric" %in% names(df)) {
-    df$latency_metric <- factor(df$latency_metric, levels = c("avg", "p50", "p99", "p99.9"))
-  }
-  if ("execution_config" %in% names(df)) {
-    df$execution_config <- factor(df$execution_config, levels = unique(df$execution_config))
-  }
-  df
-}
-
-metric_box <- function(df, x, y, fill = NULL, facet = "benchmark_rw_mode", title = NULL,
+metric_box <- function(df, x, y, provider, fill = NULL, facet = "benchmark_rw_mode", title = NULL,
                        subtitle = NULL, ylab = NULL, ncol = 2, y_zero = TRUE) {
   if (nrow(df) == 0) return(show_no_data_plot("No data for this comparison."))
-  df <- apply_factor_levels(df)
+  df <- apply_factor_levels(df, provider = provider)
   mapping <- if (is.null(fill)) {
     aes(x = .data[[x]], y = .data[[y]])
   } else {
@@ -262,99 +348,168 @@ metric_box <- function(df, x, y, fill = NULL, facet = "benchmark_rw_mode", title
   p + guides(fill = "none")
 }
 
-metric_summary <- function(df, group_cols, metric_col) {
-  if (nrow(df) == 0) return(df)
-  aggregate(
-    df[[metric_col]],
-    df[group_cols],
-    function(x) c(median = median(x, na.rm = TRUE), min = min(x, na.rm = TRUE), max = max(x, na.rm = TRUE), n = length(x))
-  )
+emit_heading <- function(level, title) {
+  cat(sprintf("%s %s\n\n", paste(rep("#", level), collapse = ""), title))
 }
 
-render_performance_class_plots <- function(metric_expression, ylab, title_suffix,
-                                           block_size_setting, iodepth_setting,
-                                           heading_level = 3) {
-  for (machine_type in report_config$performance_class_machine_types) {
-    cat(sprintf("%s %s\n\n", paste(rep("#", heading_level), collapse = ""), machine_type))
-    machine_literal <- as.character(DBI::dbQuoteString(con, machine_type))
-    df <- sql(glue::glue("
+emit_table <- function(df, caption, empty_message = "No data is available for this section.") {
+  if (nrow(df) == 0) {
+    cat(empty_message, "\n\n")
+  } else {
+    print(knitr::kable(df, caption = caption))
+    cat("\n\n")
+  }
+}
+
+provider_query <- function(provider, query) {
+  provider_literal <- quote_sql(provider)
+  sql(glue::glue(query, provider_literal = provider_literal))
+}
+
+filter_text <- function(provider, family) {
+  cfg <- provider_configs[[provider]]
+  if (identical(family, "throughput")) {
+    sprintf(
+      "Provider = %s, os_tuning = %s, io_engine = %s, block_size = %s, iodepth = %s, numjobs = %s, reference block filesystem = %s, reference local filesystem = %s.",
+      provider_label(provider), cfg$reference_os_tuning, cfg$default_io_engine, cfg$throughput_block_size,
+      cfg$throughput_iodepth, cfg$default_numjobs, cfg$reference_block_filesystem, cfg$reference_local_filesystem
+    )
+  } else {
+    sprintf(
+      "Provider = %s, os_tuning = %s, block_size = %s, io_engine = %s, iodepth = %s, numjobs = %s, reference block filesystem = %s, reference local filesystem = %s.",
+      provider_label(provider), cfg$reference_os_tuning, cfg$iops_latency_block_size, cfg$default_io_engine,
+      cfg$iops_latency_iodepth, cfg$default_numjobs, cfg$reference_block_filesystem, cfg$reference_local_filesystem
+    )
+  }
+}
+
+render_performance_class_plots_provider <- function(provider, metric_expression, ylab, title_suffix,
+                                                    block_size_value, iodepth_value, heading_level = 4,
+                                                    y_zero = TRUE) {
+  cfg <- provider_configs[[provider]]
+  provider_literal <- quote_sql(provider)
+  machine_types <- cfg$performance_class_machine_types
+  if (length(machine_types) == 0) {
+    cat("No machine types are available for this comparison.\n\n")
+    return(invisible(NULL))
+  }
+  for (machine_type in machine_types) {
+    emit_heading(heading_level, machine_type)
+    machine_literal <- quote_sql(machine_type)
+    block_size_literal <- quote_sql(block_size_value)
+    df <- provider_query(provider, glue::glue("
     select block_volume_performance_class, benchmark_rw_mode,
            {metric_expression} as metric_value
     from fio
-    where valid_measurement
+    where provider = {provider_literal}
+      and valid_measurement
+      and os_tuning = {quote_sql(cfg$reference_os_tuning)}
       and benchmark_machine_type = {machine_literal}
       and storage_target = 'block'
-      and io_engine = (select default_io_engine from report_config)
-      and block_size = (select {block_size_setting} from report_config)
-      and iodepth = (select {iodepth_setting} from report_config)
-      and numjobs = (select default_numjobs from report_config)
+      and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+      and io_engine = {quote_sql(cfg$default_io_engine)}
+      and block_size = {block_size_literal}
+      and iodepth = {iodepth_value}
+      and numjobs = {cfg$default_numjobs}
       and block_volume_performance_class is not null
     "))
     print(metric_box(
       df,
       x = "block_volume_performance_class",
       y = "metric_value",
+      provider = provider,
       fill = "block_volume_performance_class",
       title = sprintf("%s block storage %s by performance class", machine_type, title_suffix),
-      ylab = ylab
+      ylab = ylab,
+      y_zero = y_zero
     ))
     cat("\n\n")
   }
 }
 
-validate_rows <- sql("
-select
-  count(*) as fio_rows,
-  sum(case when valid_measurement then 1 else 0 end) as valid_rows,
-  sum(case when not valid_measurement then 1 else 0 end) as invalid_rows,
-  count(distinct run_id) as runs
-from fio
-")
+render_filesystem_plot <- function(provider, storage_target, metric_expression, title, ylab,
+                                   block_size, iodepth, y_zero = TRUE) {
+  cfg <- provider_configs[[provider]]
+  provider_literal <- quote_sql(provider)
+  ref_machine <- quote_sql(cfg$reference_machine_type)
+  ref_perf <- quote_sql(cfg$reference_block_performance_class)
+  block_size_literal <- quote_sql(block_size)
+  target_literal <- quote_sql(storage_target)
+  df <- provider_query(provider, glue::glue("
+  select storage_target_filesystem, benchmark_rw_mode,
+         {metric_expression} as metric_value
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {ref_machine}
+    and block_volume_performance_class = {ref_perf}
+    and storage_target = {target_literal}
+    and storage_target_filesystem is not null
+    and storage_target_filesystem <> ''
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {block_size_literal}
+    and iodepth = {iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(
+    df,
+    x = "storage_target_filesystem",
+    y = "metric_value",
+    provider = provider,
+    fill = "storage_target_filesystem",
+    title = title,
+    ylab = ylab,
+    ncol = 2,
+    y_zero = y_zero
+  ))
+  cat("\n\n")
+}
 
-block_size_comparison_text <- paste(
-  sprintf(
-    "%s uses iodepth = %s",
-    report_config$block_size_comparison$block_size,
-    report_config$block_size_comparison$iodepth
-  ),
-  collapse = "; "
-)
-
-resolved_config <- data.frame(
-  setting = c(
-    "reference_machine_type",
-    "instance_comparison_block_performance_class",
-    "local_instance_comparison_block_performance_class",
-    "reference_block_performance_class",
-    "local_instance_rw_mode",
-    "default_io_engine",
-    "throughput_block_size",
-    "throughput_iodepth",
-    "iops_latency_block_size",
-    "iops_latency_iodepth",
-    "default_numjobs",
-    "psync_iodepth",
-    "psync_numjobs",
-    "block_size_comparison"
-  ),
-  value = c(
-    report_config$reference_machine_type,
-    report_config$instance_comparison_block_performance_class,
-    report_config$local_instance_comparison_block_performance_class,
-    report_config$reference_block_performance_class,
-    report_config$local_instance_rw_mode,
-    report_config$default_io_engine,
-    report_config$throughput_block_size,
-    report_config$throughput_iodepth,
-    report_config$iops_latency_block_size,
-    report_config$iops_latency_iodepth,
-    report_config$default_numjobs,
-    report_config$psync_iodepth,
-    report_config$psync_numjobs,
-    block_size_comparison_text
-  ),
-  stringsAsFactors = FALSE
-)
+provider_resolved_config <- function(provider) {
+  cfg <- provider_configs[[provider]]
+  data.frame(
+    setting = c(
+      "reference_machine_type",
+      "instance_comparison_block_performance_class",
+      "local_instance_comparison_block_performance_class",
+      "reference_block_performance_class",
+      "reference_block_filesystem",
+      "reference_local_filesystem",
+      "reference_os_tuning",
+      "local_instance_rw_mode",
+      "default_io_engine",
+      "throughput_block_size",
+      "throughput_iodepth",
+      "iops_latency_block_size",
+      "iops_latency_iodepth",
+      "default_numjobs",
+      "psync_iodepth",
+      "psync_numjobs",
+      "available_filesystems"
+    ),
+    value = c(
+      cfg$reference_machine_type,
+      cfg$instance_comparison_block_performance_class,
+      cfg$local_instance_comparison_block_performance_class,
+      cfg$reference_block_performance_class,
+      cfg$reference_block_filesystem,
+      cfg$reference_local_filesystem,
+      cfg$reference_os_tuning,
+      cfg$local_instance_rw_mode,
+      cfg$default_io_engine,
+      cfg$throughput_block_size,
+      cfg$throughput_iodepth,
+      cfg$iops_latency_block_size,
+      cfg$iops_latency_iodepth,
+      cfg$default_numjobs,
+      cfg$psync_iodepth,
+      cfg$psync_numjobs,
+      paste(cfg$filesystem_levels, collapse = ", ")
+    ),
+    stringsAsFactors = FALSE
+  )
+}
 ```
 
 This report analyzes storage benchmark results from `r result_id`.
@@ -365,1224 +520,870 @@ if (!is.null(params$note) && nzchar(params$note)) {
 }
 ```
 
-# Overview
+The report is organized by provider. Each provider section keeps the same analysis hierarchy as the previous single-provider report and adds a `Filesystem Impact` subsection under `Throughput`, `IOPS`, and `Latency`. Outside the filesystem-impact sections, the plots fix a reference filesystem per target; those defaults are listed in the resolved configuration table for each provider.
 
-The report intentionally avoids using `benchmark_name` as a plot facet for impact analysis. The benchmark name is a derived label that includes dimensions such as block size and I/O engine. The plots below compare one dimension at a time while fixing the other relevant dimensions in SQL.
+```{r provider-sections, echo=FALSE, results='asis'}
+for (provider in providers) {
+  cfg <- provider_configs[[provider]]
+  label <- provider_label(provider)
+  provider_literal <- quote_sql(provider)
 
-The renderer resolves its comparison constants before executing the plot queries. A passed JSON file overrides defaults. If a zoom-in dimension has exactly one available value, that value is selected automatically. The resolved values are shown below. Fixed comparisons filter `io_engine`, `block_size`, `iodepth`, and `numjobs` explicitly. Execution-configuration plots show the available combinations of `io_engine`, `iodepth`, and `numjobs`. Block-size comparisons apply the configured block-size-to-`iodepth` mapping.
+  emit_heading(1, label)
 
-```{r coverage-counts}
-coverage_counts <- sql("
-select
-  (select count(*) from scenarios) as scenarios,
-  (select count(*) from benchmarks) as benchmark_rows,
-  (select count(*) from fio) as fio_rows,
-  (select count(*) from failures) as failures,
-  (select sum(case when valid_measurement then 1 else 0 end) from fio) as valid_fio_rows
-")
-kable(coverage_counts, caption = "Parsed storage benchmark data")
-```
+  emit_heading(2, "Overview")
+  cat("All plots and tables in this section are filtered to one provider. Missing slices render as no-data sections instead of aborting the report.\n\n")
 
-```{r filter-policy, echo=FALSE}
-filter_policy <- data.frame(
-  section = c("Throughput", "Throughput block-size impact", "IOPS", "Latency"),
-  default_filter = c(
-    sprintf(
-      "block_size = %s, io_engine = %s, iodepth = %s, numjobs = %s",
-      report_config$throughput_block_size, report_config$default_io_engine,
-      report_config$throughput_iodepth, report_config$default_numjobs
-    ),
-    sprintf("io_engine = %s, numjobs = %s; %s", report_config$default_io_engine, report_config$default_numjobs, block_size_comparison_text),
-    sprintf(
-      "block_size = %s; %s uses iodepth = %s and numjobs = %s; psync uses iodepth = %s and numjobs = %s",
-      report_config$iops_latency_block_size, report_config$default_io_engine,
-      report_config$iops_latency_iodepth, report_config$default_numjobs,
-      report_config$psync_iodepth, report_config$psync_numjobs
-    ),
-    sprintf(
-      "block_size = %s, io_engine = %s, iodepth = %s, numjobs = %s",
-      report_config$iops_latency_block_size, report_config$default_io_engine,
-      report_config$iops_latency_iodepth, report_config$default_numjobs
+  coverage_counts <- provider_query(provider, "
+  select
+    (select count(*) from scenarios where provider = {provider_literal}) as scenarios,
+    (select count(*) from benchmarks where provider = {provider_literal}) as benchmark_rows,
+    (select count(*) from fio where provider = {provider_literal}) as fio_rows,
+    (select count(*) from failures where provider = {provider_literal}) as failures,
+    (select sum(case when valid_measurement then 1 else 0 end) from fio where provider = {provider_literal}) as valid_fio_rows
+  ")
+  emit_table(coverage_counts, sprintf("%s parsed storage benchmark data", label))
+
+  emit_table(
+    provider_resolved_config(provider),
+    sprintf("%s resolved report configuration", label)
+  )
+
+  scenario_table <- provider_query(provider, "
+  select run_id, scenario_name, benchmark_machine_type, benchmark_availability_zone,
+         os_tuning, access_mode, storage_targets_raw,
+         storage_local_filesystem, storage_block_filesystem, block_volume_performance_class
+  from scenarios
+  where provider = {provider_literal}
+  order by run_id, scenario_name
+  ")
+  emit_table(scenario_table, sprintf("%s scenario coverage", label))
+
+  dimension_coverage <- provider_query(provider, "
+  select benchmark_machine_type, block_volume_performance_class, storage_target, storage_target_filesystem,
+         benchmark_rw_mode, io_engine, block_size, iodepth, numjobs,
+         iodepth * numjobs as effective_concurrency,
+         sum(case when valid_measurement then 1 else 0 end) as valid_repetitions
+  from fio
+  where provider = {provider_literal}
+  group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+  order by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+  ")
+  emit_table(dimension_coverage, sprintf("%s coverage by explicit analysis dimensions", label))
+
+  emit_heading(2, "Throughput")
+  cat("Throughput is reported as MiB/s using `primary_bw_bytes_per_sec`. ", filter_text(provider, "throughput"), "\n\n", sep = "")
+
+  emit_heading(3, "Instance Type Impact")
+  emit_heading(4, "Block Storage")
+  throughput_instance <- provider_query(provider, glue::glue("
+  select benchmark_machine_type, benchmark_rw_mode,
+         primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_volume_performance_class = {quote_sql(cfg$instance_comparison_block_performance_class)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$throughput_block_size)}
+    and iodepth = {cfg$throughput_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(throughput_instance, "benchmark_machine_type", "bw_mib_per_sec", provider, "benchmark_machine_type", title = sprintf("%s block storage throughput by instance type", label), ylab = "Throughput (MiB/s)"))
+  cat("\n\n")
+
+  emit_heading(4, "Local Storage")
+  throughput_instance_local <- provider_query(provider, glue::glue("
+  select benchmark_machine_type, benchmark_rw_mode,
+         primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and storage_target = 'local'
+    and storage_target_filesystem = {quote_sql(cfg$reference_local_filesystem)}
+    and block_volume_performance_class = {quote_sql(cfg$local_instance_comparison_block_performance_class)}
+    and benchmark_rw_mode = {quote_sql(cfg$local_instance_rw_mode)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(throughput_instance_local, "benchmark_machine_type", "bw_mib_per_sec", provider, "benchmark_machine_type", title = sprintf("%s local storage throughput by instance type", label), ylab = "Throughput (MiB/s)", ncol = 1))
+  cat("\n\n")
+
+  emit_heading(3, "Block Storage Performance Class Impact")
+  render_performance_class_plots_provider(provider, "primary_bw_bytes_per_sec / 1024.0 / 1024.0", "Throughput (MiB/s)", "throughput", cfg$throughput_block_size, cfg$throughput_iodepth)
+
+  emit_heading(3, "Storage Target Impact")
+  throughput_target <- provider_query(provider, glue::glue("
+  select storage_target, benchmark_rw_mode,
+         primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and (
+      (storage_target = 'local' and storage_target_filesystem = {quote_sql(cfg$reference_local_filesystem)}) or
+      (storage_target = 'block' and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)})
     )
-  )
-)
-kable(filter_policy, caption = "Default filtering policy")
-```
-
-```{r resolved-config, echo=FALSE}
-kable(resolved_config, caption = "Resolved report configuration")
-```
-
-```{r scenario-table}
-scenario_table <- sql("
-select run_id, scenario_name, benchmark_machine_type, benchmark_availability_zone,
-       os_tuning, access_mode, storage_targets_raw, block_volume_performance_class
-from scenarios
-order by run_id, scenario_name
-")
-kable(scenario_table, caption = "Scenario coverage")
-```
-
-```{r dimension-coverage}
-dimension_coverage <- sql("
-select benchmark_machine_type, block_volume_performance_class, storage_target,
-       benchmark_rw_mode, io_engine, block_size, iodepth, numjobs,
-       iodepth * numjobs as effective_concurrency,
-       sum(case when valid_measurement then 1 else 0 end) as valid_repetitions
-from fio
-group by 1, 2, 3, 4, 5, 6, 7, 8, 9
-order by 1, 2, 3, 4, 5, 6, 7, 8, 9
-")
-kable(dimension_coverage, caption = "Coverage by explicit analysis dimensions")
-```
-
-# Throughput
-
-Throughput is reported as MiB/s using `primary_bw_bytes_per_sec`. Main comparisons use the resolved throughput subset shown in the configuration table.
-
-## Instance Type Impact
-
-### Block Storage
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r throughput-instance, fig.width=12, fig.height=7}
-throughput_instance <- sql("
-select benchmark_machine_type, benchmark_rw_mode,
-       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
-from fio
-where valid_measurement
-  and storage_target = 'block'
-  and block_volume_performance_class = (select instance_comparison_block_performance_class from report_config)
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select throughput_block_size from report_config)
-  and iodepth = (select throughput_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  throughput_instance,
-  x = "benchmark_machine_type",
-  y = "bw_mib_per_sec",
-  fill = "benchmark_machine_type",
-  title = "Block storage throughput by instance type",
-  ylab = "Throughput (MiB/s)"
-)
-```
-
-### Local Storage
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r throughput-instance-local, fig.width=12, fig.height=5}
-throughput_instance_local <- sql("
-select benchmark_machine_type, benchmark_rw_mode,
-       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
-from fio
-where valid_measurement
-  and storage_target = 'local'
-  and block_volume_performance_class = (select local_instance_comparison_block_performance_class from report_config)
-  and benchmark_rw_mode = (select local_instance_rw_mode from report_config)
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  throughput_instance_local,
-  x = "benchmark_machine_type",
-  y = "bw_mib_per_sec",
-  fill = "benchmark_machine_type",
-  title = "Local storage throughput by instance type",
-  ylab = "Throughput (MiB/s)",
-  ncol = 1
-)
-```
-
-## Block Storage Performance Class Impact
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r throughput-perf-class, results='asis', fig.width=12, fig.height=7}
-render_performance_class_plots(
-  "primary_bw_bytes_per_sec / 1024.0 / 1024.0",
-  "Throughput (MiB/s)",
-  "throughput",
-  "throughput_block_size",
-  "throughput_iodepth"
-)
-```
-
-## Storage Target Impact
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r throughput-target, fig.width=12, fig.height=7}
-throughput_target <- sql("
-select storage_target, benchmark_rw_mode,
-       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target in ('local', 'block')
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select throughput_block_size from report_config)
-  and iodepth = (select throughput_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  throughput_target,
-  x = "storage_target",
-  y = "bw_mib_per_sec",
-  fill = "storage_target",
-  title = "Throughput by storage target",
-  ylab = "Throughput (MiB/s)"
-)
-```
-
-## Execution Configuration Impact
-
-The execution configuration combines `io_engine`, `iodepth`, and `numjobs`. This makes concurrency differences explicit instead of attributing them to the I/O engine alone.
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r throughput-execution-config, fig.width=12, fig.height=7}
-throughput_execution_config <- sql("
-select concat(io_engine, ' / q', cast(iodepth as varchar), ' / jobs=', cast(numjobs as varchar)) as execution_config,
-       benchmark_rw_mode,
-       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and block_size = (select throughput_block_size from report_config)
-order by case when io_engine = 'io_uring' then 1 else 2 end, iodepth, numjobs
-")
-metric_box(
-  throughput_execution_config,
-  x = "execution_config",
-  y = "bw_mib_per_sec",
-  fill = "execution_config",
-  title = "Throughput by execution configuration",
-  ylab = "Throughput (MiB/s)"
-)
-```
-
-### io_uring Queue Depth
-
-This diagnostic fixes `io_engine` and `numjobs`, then compares `iodepth`.
-
-```{r throughput-iouring-iodepth, fig.width=12, fig.height=7}
-throughput_iouring_iodepth <- sql("
-select concat('q', cast(iodepth as varchar)) as iodepth_config, benchmark_rw_mode,
-       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and block_size = (select throughput_block_size from report_config)
-  and io_engine = (select default_io_engine from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  throughput_iouring_iodepth,
-  x = "iodepth_config",
-  y = "bw_mib_per_sec",
-  fill = "iodepth_config",
-  title = "io_uring throughput by queue depth",
-  ylab = "Throughput (MiB/s)"
-)
-```
-
-### psync Worker Count
-
-This diagnostic fixes `io_engine = psync` and `iodepth`, then compares `numjobs`.
-
-```{r throughput-psync-numjobs, fig.width=12, fig.height=7}
-throughput_psync_numjobs <- sql("
-select concat('jobs=', cast(numjobs as varchar)) as numjobs_config, benchmark_rw_mode,
-       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and block_size = (select throughput_block_size from report_config)
-  and io_engine = 'psync'
-  and iodepth = (select psync_iodepth from report_config)
-")
-metric_box(
-  throughput_psync_numjobs,
-  x = "numjobs_config",
-  y = "bw_mib_per_sec",
-  fill = "numjobs_config",
-  title = "psync throughput by worker count",
-  ylab = "Throughput (MiB/s)"
-)
-```
-
-## Block Size Impact
-
-### Block Storage
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r throughput-block-size, fig.width=12, fig.height=7}
-throughput_block_size <- sql("
-select block_size, benchmark_rw_mode,
-       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and io_engine = (select default_io_engine from report_config)
-  and numjobs = (select default_numjobs from report_config)
-  and exists (
-    select 1 from report_block_size_comparison comparison
-    where comparison.block_size = fio.block_size
-      and comparison.iodepth = fio.iodepth
-  )
-")
-metric_box(
-  throughput_block_size,
-  x = "block_size",
-  y = "bw_mib_per_sec",
-  fill = "block_size",
-  title = "Throughput by block size",
-  ylab = "Throughput (MiB/s)"
-)
-```
-
-### Local Storage
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r throughput-block-size-local, fig.width=12, fig.height=7}
-throughput_block_size_local <- sql("
-select block_size, benchmark_rw_mode,
-       primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'local'
-  and io_engine = (select default_io_engine from report_config)
-  and numjobs = (select default_numjobs from report_config)
-  and exists (
-    select 1 from report_block_size_comparison comparison
-    where comparison.block_size = fio.block_size
-      and comparison.iodepth = fio.iodepth
-  )
-")
-metric_box(
-  throughput_block_size_local,
-  x = "block_size",
-  y = "bw_mib_per_sec",
-  fill = "block_size",
-  title = "Local storage throughput by block size",
-  ylab = "Throughput (MiB/s)"
-)
-```
-
-```{r throughput-summary}
-throughput_summary <- sql("
-select benchmark_machine_type, block_volume_performance_class, storage_target,
-       benchmark_rw_mode, io_engine, block_size, iodepth, numjobs,
-       iodepth * numjobs as effective_concurrency,
-       round(median(primary_bw_bytes_per_sec) / 1024.0 / 1024.0, 2) as median_mib_per_sec,
-       round(avg(primary_bw_bytes_per_sec) / 1024.0 / 1024.0, 2) as avg_mib_per_sec,
-       count(*) as repetitions
-from fio
-where valid_measurement
-  and block_size = (select throughput_block_size from report_config)
-  and io_engine = (select default_io_engine from report_config)
-  and iodepth = (select throughput_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-group by 1, 2, 3, 4, 5, 6, 7, 8, 9
-order by 1, 2, 3, 4, 5, 6, 7, 8, 9
-")
-kable(throughput_summary, caption = sprintf("Throughput summary for %s %s measurements", report_config$default_io_engine, report_config$throughput_block_size))
-```
-
-# IOPS
-
-IOPS is reported using `primary_iops`. Main comparisons use the resolved IOPS subset shown in the configuration table. Execution-configuration plots show the available engine, queue-depth, and worker-count combinations.
-
-## Instance Type Impact
-
-### Block Storage
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r iops-instance, fig.width=12, fig.height=7}
-iops_instance <- sql("
-select benchmark_machine_type, benchmark_rw_mode, primary_iops as iops
-from fio
-where valid_measurement
-  and storage_target = 'block'
-  and block_volume_performance_class = (select instance_comparison_block_performance_class from report_config)
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  iops_instance,
-  x = "benchmark_machine_type",
-  y = "iops",
-  fill = "benchmark_machine_type",
-  title = "Block storage IOPS by instance type",
-  ylab = "IOPS"
-)
-```
-
-### Local Storage
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r iops-instance-local, fig.width=12, fig.height=5}
-iops_instance_local <- sql("
-select benchmark_machine_type, benchmark_rw_mode, primary_iops as iops
-from fio
-where valid_measurement
-  and storage_target = 'local'
-  and block_volume_performance_class = (select local_instance_comparison_block_performance_class from report_config)
-  and benchmark_rw_mode = (select local_instance_rw_mode from report_config)
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  iops_instance_local,
-  x = "benchmark_machine_type",
-  y = "iops",
-  fill = "benchmark_machine_type",
-  title = "Local storage IOPS by instance type",
-  ylab = "IOPS",
-  ncol = 1
-)
-```
-
-## Block Storage Performance Class Impact
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r iops-perf-class, results='asis', fig.width=12, fig.height=7}
-render_performance_class_plots(
-  "primary_iops",
-  "IOPS",
-  "IOPS",
-  "iops_latency_block_size",
-  "iops_latency_iodepth"
-)
-```
-
-## Execution Configuration Impact
-
-The execution configuration combines `io_engine`, `iodepth`, and `numjobs`. This makes concurrency differences explicit instead of attributing them to the I/O engine alone.
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r iops-execution-config, fig.width=12, fig.height=7}
-iops_execution_config <- sql("
-select concat(io_engine, ' / q', cast(iodepth as varchar), ' / jobs=', cast(numjobs as varchar)) as execution_config,
-       benchmark_rw_mode, primary_iops as iops
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and block_size = (select iops_latency_block_size from report_config)
-order by case when io_engine = 'io_uring' then 1 else 2 end, iodepth, numjobs
-")
-metric_box(
-  iops_execution_config,
-  x = "execution_config",
-  y = "iops",
-  fill = "execution_config",
-  title = "IOPS by execution configuration",
-  ylab = "IOPS"
-)
-```
-
-### io_uring Queue Depth
-
-This diagnostic fixes `io_engine` and `numjobs`, then compares `iodepth`.
-
-```{r iops-iouring-iodepth, fig.width=12, fig.height=7}
-iops_iouring_iodepth <- sql("
-select concat('q', cast(iodepth as varchar)) as iodepth_config, benchmark_rw_mode, primary_iops as iops
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and block_size = (select iops_latency_block_size from report_config)
-  and io_engine = (select default_io_engine from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  iops_iouring_iodepth,
-  x = "iodepth_config",
-  y = "iops",
-  fill = "iodepth_config",
-  title = "io_uring IOPS by queue depth",
-  ylab = "IOPS"
-)
-```
-
-### psync Worker Count
-
-This diagnostic fixes `io_engine = psync` and `iodepth`, then compares `numjobs`.
-
-```{r iops-psync-numjobs, fig.width=12, fig.height=7}
-iops_psync_numjobs <- sql("
-select concat('jobs=', cast(numjobs as varchar)) as numjobs_config, benchmark_rw_mode, primary_iops as iops
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and block_size = (select iops_latency_block_size from report_config)
-  and io_engine = 'psync'
-  and iodepth = (select psync_iodepth from report_config)
-")
-metric_box(
-  iops_psync_numjobs,
-  x = "numjobs_config",
-  y = "iops",
-  fill = "numjobs_config",
-  title = "psync IOPS by worker count",
-  ylab = "IOPS"
-)
-```
-
-## Block Size Impact
-
-### Block Storage
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r iops-block-size, fig.width=12, fig.height=7}
-iops_block_size <- sql("
-select block_size, benchmark_rw_mode, primary_iops as iops
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and io_engine = (select default_io_engine from report_config)
-  and numjobs = (select default_numjobs from report_config)
-  and exists (
-    select 1 from report_block_size_comparison comparison
-    where comparison.block_size = fio.block_size
-      and comparison.iodepth = fio.iodepth
-  )
-")
-metric_box(
-  iops_block_size,
-  x = "block_size",
-  y = "iops",
-  fill = "block_size",
-  title = "Block storage IOPS by block size",
-  ylab = "IOPS"
-)
-```
-
-### Local Storage
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r iops-block-size-local, fig.width=12, fig.height=7}
-iops_block_size_local <- sql("
-select block_size, benchmark_rw_mode, primary_iops as iops
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'local'
-  and io_engine = (select default_io_engine from report_config)
-  and numjobs = (select default_numjobs from report_config)
-  and exists (
-    select 1 from report_block_size_comparison comparison
-    where comparison.block_size = fio.block_size
-      and comparison.iodepth = fio.iodepth
-  )
-")
-metric_box(
-  iops_block_size_local,
-  x = "block_size",
-  y = "iops",
-  fill = "block_size",
-  title = "Local storage IOPS by block size",
-  ylab = "IOPS"
-)
-```
-
-## Storage Target Impact
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r iops-target, fig.width=12, fig.height=7}
-iops_target <- sql("
-select storage_target, benchmark_rw_mode, primary_iops as iops
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target in ('local', 'block')
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  iops_target,
-  x = "storage_target",
-  y = "iops",
-  fill = "storage_target",
-  title = "IOPS by storage target",
-  ylab = "IOPS"
-)
-```
-
-```{r iops-summary}
-iops_summary <- sql("
-select benchmark_machine_type, block_volume_performance_class, storage_target,
-       benchmark_rw_mode, io_engine, block_size, iodepth, numjobs,
-       iodepth * numjobs as effective_concurrency,
-       round(median(primary_iops), 2) as median_iops,
-       round(avg(primary_iops), 2) as avg_iops,
-       count(*) as repetitions
-from fio
-where valid_measurement
-  and block_size = (select iops_latency_block_size from report_config)
-group by 1, 2, 3, 4, 5, 6, 7, 8, 9
-order by 1, 2, 3, 4, 5, 6, 7, 8, 9
-")
-kable(iops_summary, caption = sprintf("IOPS summary for %s measurements", report_config$iops_latency_block_size))
-```
-
-# Latency
-
-Latency is reported in microseconds. Main comparisons use the resolved latency subset shown in the configuration table. Execution-configuration plots show the available engine, queue-depth, and worker-count combinations.
-
-## Latency Metric Overview
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-```{r latency-metric-overview, fig.width=12, fig.height=7}
-latency_metric_overview <- sql("
-select benchmark_rw_mode, 'avg' as latency_metric, primary_clat_mean_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-union all
-select benchmark_rw_mode, 'p50' as latency_metric, primary_clat_p50_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-union all
-select benchmark_rw_mode, 'p99' as latency_metric, primary_clat_p99_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-union all
-select benchmark_rw_mode, 'p99.9' as latency_metric, primary_clat_p999_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  latency_metric_overview,
-  x = "latency_metric",
-  y = "latency_us",
-  fill = "latency_metric",
-  title = "Latency distribution by metric",
-  ylab = "Latency (us)"
-)
-```
-
-## Instance Type Impact
-
-### Block Storage
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-#### P99
-
-```{r latency-instance, fig.width=12, fig.height=7}
-latency_instance <- sql("
-select benchmark_machine_type, benchmark_rw_mode,
-       primary_clat_p99_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and storage_target = 'block'
-  and block_volume_performance_class = (select instance_comparison_block_performance_class from report_config)
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  latency_instance,
-  x = "benchmark_machine_type",
-  y = "latency_us",
-  fill = "benchmark_machine_type",
-  title = "Block storage P99 latency by instance type",
-  ylab = "P99 latency (us)"
-)
-```
-
-#### P50
-
-```{r latency-instance-p50, fig.width=12, fig.height=7}
-latency_instance_p50 <- sql("
-select benchmark_machine_type, benchmark_rw_mode,
-       primary_clat_p50_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and storage_target = 'block'
-  and block_volume_performance_class = (select instance_comparison_block_performance_class from report_config)
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  latency_instance_p50,
-  x = "benchmark_machine_type",
-  y = "latency_us",
-  fill = "benchmark_machine_type",
-  title = "Block storage P50 latency by instance type",
-  ylab = "P50 latency (us)"
-)
-```
-
-### Local Storage
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-#### P99
-
-```{r latency-instance-local, fig.width=12, fig.height=5}
-latency_instance_local <- sql("
-select benchmark_machine_type, benchmark_rw_mode,
-       primary_clat_p99_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and storage_target = 'local'
-  and block_volume_performance_class = (select local_instance_comparison_block_performance_class from report_config)
-  and benchmark_rw_mode = (select local_instance_rw_mode from report_config)
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  latency_instance_local,
-  x = "benchmark_machine_type",
-  y = "latency_us",
-  fill = "benchmark_machine_type",
-  title = "Local storage P99 latency by instance type",
-  ylab = "P99 latency (us)",
-  ncol = 1
-)
-```
-
-#### P50
-
-```{r latency-instance-local-p50, fig.width=12, fig.height=5}
-latency_instance_local_p50 <- sql("
-select benchmark_machine_type, benchmark_rw_mode,
-       primary_clat_p50_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and storage_target = 'local'
-  and block_volume_performance_class = (select local_instance_comparison_block_performance_class from report_config)
-  and benchmark_rw_mode = (select local_instance_rw_mode from report_config)
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  latency_instance_local_p50,
-  x = "benchmark_machine_type",
-  y = "latency_us",
-  fill = "benchmark_machine_type",
-  title = "Local storage P50 latency by instance type",
-  ylab = "P50 latency (us)",
-  ncol = 1
-)
-```
-
-## Block Storage Performance Class Impact
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-### P99
-
-```{r latency-perf-class, results='asis', fig.width=12, fig.height=7}
-render_performance_class_plots(
-  "primary_clat_p99_ns / 1000.0",
-  "P99 latency (us)",
-  "P99 latency",
-  "iops_latency_block_size",
-  "iops_latency_iodepth",
-  heading_level = 4
-)
-```
-
-### P50
-
-```{r latency-perf-class-p50, results='asis', fig.width=12, fig.height=7}
-render_performance_class_plots(
-  "primary_clat_p50_ns / 1000.0",
-  "P50 latency (us)",
-  "P50 latency",
-  "iops_latency_block_size",
-  "iops_latency_iodepth",
-  heading_level = 4
-)
-```
-
-## Execution Configuration Impact
-
-The execution configuration combines `io_engine`, `iodepth`, and `numjobs`. This makes concurrency differences explicit instead of attributing them to the I/O engine alone.
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-### P99
-
-```{r latency-execution-config, fig.width=12, fig.height=7}
-latency_execution_config <- sql("
-select concat(io_engine, ' / q', cast(iodepth as varchar), ' / jobs=', cast(numjobs as varchar)) as execution_config,
-       benchmark_rw_mode,
-       primary_clat_p99_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and block_size = (select iops_latency_block_size from report_config)
-order by case when io_engine = 'io_uring' then 1 else 2 end, iodepth, numjobs
-")
-metric_box(
-  latency_execution_config,
-  x = "execution_config",
-  y = "latency_us",
-  fill = "execution_config",
-  title = "P99 latency by execution configuration",
-  ylab = "P99 latency (us)"
-)
-```
-
-#### io_uring Queue Depth
-
-This diagnostic fixes `io_engine` and `numjobs`, then compares `iodepth`.
-
-```{r latency-iouring-iodepth, fig.width=12, fig.height=7}
-latency_iouring_iodepth <- sql("
-select concat('q', cast(iodepth as varchar)) as iodepth_config, benchmark_rw_mode,
-       primary_clat_p99_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and block_size = (select iops_latency_block_size from report_config)
-  and io_engine = (select default_io_engine from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  latency_iouring_iodepth,
-  x = "iodepth_config",
-  y = "latency_us",
-  fill = "iodepth_config",
-  title = "io_uring P99 latency by queue depth",
-  ylab = "P99 latency (us)"
-)
-```
-
-#### psync Worker Count
-
-This diagnostic fixes `io_engine = psync` and `iodepth`, then compares `numjobs`.
-
-```{r latency-psync-numjobs, fig.width=12, fig.height=7}
-latency_psync_numjobs <- sql("
-select concat('jobs=', cast(numjobs as varchar)) as numjobs_config, benchmark_rw_mode,
-       primary_clat_p99_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and block_size = (select iops_latency_block_size from report_config)
-  and io_engine = 'psync'
-  and iodepth = (select psync_iodepth from report_config)
-")
-metric_box(
-  latency_psync_numjobs,
-  x = "numjobs_config",
-  y = "latency_us",
-  fill = "numjobs_config",
-  title = "psync P99 latency by worker count",
-  ylab = "P99 latency (us)"
-)
-```
-
-### P50
-
-```{r latency-execution-config-p50, fig.width=12, fig.height=7}
-latency_execution_config_p50 <- sql("
-select concat(io_engine, ' / q', cast(iodepth as varchar), ' / jobs=', cast(numjobs as varchar)) as execution_config,
-       benchmark_rw_mode,
-       primary_clat_p50_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and block_size = (select iops_latency_block_size from report_config)
-order by case when io_engine = 'io_uring' then 1 else 2 end, iodepth, numjobs
-")
-metric_box(
-  latency_execution_config_p50,
-  x = "execution_config",
-  y = "latency_us",
-  fill = "execution_config",
-  title = "P50 latency by execution configuration",
-  ylab = "P50 latency (us)"
-)
-```
-
-#### io_uring Queue Depth
-
-```{r latency-iouring-iodepth-p50, fig.width=12, fig.height=7}
-latency_iouring_iodepth_p50 <- sql("
-select concat('q', cast(iodepth as varchar)) as iodepth_config, benchmark_rw_mode,
-       primary_clat_p50_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and block_size = (select iops_latency_block_size from report_config)
-  and io_engine = (select default_io_engine from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  latency_iouring_iodepth_p50,
-  x = "iodepth_config",
-  y = "latency_us",
-  fill = "iodepth_config",
-  title = "io_uring P50 latency by queue depth",
-  ylab = "P50 latency (us)"
-)
-```
-
-#### psync Worker Count
-
-```{r latency-psync-numjobs-p50, fig.width=12, fig.height=7}
-latency_psync_numjobs_p50 <- sql("
-select concat('jobs=', cast(numjobs as varchar)) as numjobs_config, benchmark_rw_mode,
-       primary_clat_p50_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and block_size = (select iops_latency_block_size from report_config)
-  and io_engine = 'psync'
-  and iodepth = (select psync_iodepth from report_config)
-")
-metric_box(
-  latency_psync_numjobs_p50,
-  x = "numjobs_config",
-  y = "latency_us",
-  fill = "numjobs_config",
-  title = "psync P50 latency by worker count",
-  ylab = "P50 latency (us)"
-)
-```
-
-## Block Size Impact
-
-The following plots make the configured block-size effect visible. Queue depth is matched per block size using the resolved `block_size_comparison` mapping.
-
-### Block Storage
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-#### P99
-
-```{r latency-block-size, fig.width=12, fig.height=7}
-latency_block_size <- sql("
-select block_size, benchmark_rw_mode,
-       primary_clat_p99_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and io_engine = (select default_io_engine from report_config)
-  and numjobs = (select default_numjobs from report_config)
-  and exists (
-    select 1 from report_block_size_comparison comparison
-    where comparison.block_size = fio.block_size
-      and comparison.iodepth = fio.iodepth
-  )
-")
-metric_box(
-  latency_block_size,
-  x = "block_size",
-  y = "latency_us",
-  fill = "block_size",
-  title = "Block storage P99 latency by block size",
-  ylab = "P99 latency (us)"
-)
-```
-
-#### P50
-
-```{r latency-block-size-p50, fig.width=12, fig.height=7}
-latency_block_size_p50 <- sql("
-select block_size, benchmark_rw_mode,
-       primary_clat_p50_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'block'
-  and io_engine = (select default_io_engine from report_config)
-  and numjobs = (select default_numjobs from report_config)
-  and exists (
-    select 1 from report_block_size_comparison comparison
-    where comparison.block_size = fio.block_size
-      and comparison.iodepth = fio.iodepth
-  )
-")
-metric_box(
-  latency_block_size_p50,
-  x = "block_size",
-  y = "latency_us",
-  fill = "block_size",
-  title = "Block storage P50 latency by block size",
-  ylab = "P50 latency (us)"
-)
-```
-
-### Local Storage
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-#### P99
-
-```{r latency-block-size-local, fig.width=12, fig.height=7}
-latency_block_size_local <- sql("
-select block_size, benchmark_rw_mode,
-       primary_clat_p99_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'local'
-  and io_engine = (select default_io_engine from report_config)
-  and numjobs = (select default_numjobs from report_config)
-  and exists (
-    select 1 from report_block_size_comparison comparison
-    where comparison.block_size = fio.block_size
-      and comparison.iodepth = fio.iodepth
-  )
-")
-metric_box(
-  latency_block_size_local,
-  x = "block_size",
-  y = "latency_us",
-  fill = "block_size",
-  title = "Local storage P99 latency by block size",
-  ylab = "P99 latency (us)"
-)
-```
-
-#### P50
-
-```{r latency-block-size-local-p50, fig.width=12, fig.height=7}
-latency_block_size_local_p50 <- sql("
-select block_size, benchmark_rw_mode,
-       primary_clat_p50_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target = 'local'
-  and io_engine = (select default_io_engine from report_config)
-  and numjobs = (select default_numjobs from report_config)
-  and exists (
-    select 1 from report_block_size_comparison comparison
-    where comparison.block_size = fio.block_size
-      and comparison.iodepth = fio.iodepth
-  )
-")
-metric_box(
-  latency_block_size_local_p50,
-  x = "block_size",
-  y = "latency_us",
-  fill = "block_size",
-  title = "Local storage P50 latency by block size",
-  ylab = "P50 latency (us)"
-)
-```
-
-## Storage Target Impact
-
-Filter values: see the resolved report configuration table above. Expand the collapsed code block to inspect the exact SQL predicate for this plot.
-
-### P99
-
-```{r latency-target, fig.width=12, fig.height=7}
-latency_target <- sql("
-select storage_target, benchmark_rw_mode,
-       primary_clat_p99_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target in ('local', 'block')
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  latency_target,
-  x = "storage_target",
-  y = "latency_us",
-  fill = "storage_target",
-  title = "P99 latency by storage target",
-  ylab = "P99 latency (us)"
-)
-```
-
-### P50
-
-```{r latency-target-p50, fig.width=12, fig.height=7}
-latency_target_p50 <- sql("
-select storage_target, benchmark_rw_mode,
-       primary_clat_p50_ns / 1000.0 as latency_us
-from fio
-where valid_measurement
-  and benchmark_machine_type = (select reference_machine_type from report_config)
-  and block_volume_performance_class = (select reference_block_performance_class from report_config)
-  and storage_target in ('local', 'block')
-  and io_engine = (select default_io_engine from report_config)
-  and block_size = (select iops_latency_block_size from report_config)
-  and iodepth = (select iops_latency_iodepth from report_config)
-  and numjobs = (select default_numjobs from report_config)
-")
-metric_box(
-  latency_target_p50,
-  x = "storage_target",
-  y = "latency_us",
-  fill = "storage_target",
-  title = "P50 latency by storage target",
-  ylab = "P50 latency (us)"
-)
-```
-
-```{r latency-summary}
-latency_summary <- sql("
-select benchmark_machine_type, block_volume_performance_class, storage_target,
-       benchmark_rw_mode, io_engine, block_size, iodepth, numjobs,
-       iodepth * numjobs as effective_concurrency,
-       round(median(primary_clat_mean_ns) / 1000.0, 2) as median_avg_us,
-       round(median(primary_clat_p50_ns) / 1000.0, 2) as median_p50_us,
-       round(median(primary_clat_p99_ns) / 1000.0, 2) as median_p99_us,
-       round(median(primary_clat_p999_ns) / 1000.0, 2) as median_p999_us,
-       count(*) as repetitions
-from fio
-where valid_measurement
-  and block_size = (select iops_latency_block_size from report_config)
-group by 1, 2, 3, 4, 5, 6, 7, 8, 9
-order by 1, 2, 3, 4, 5, 6, 7, 8, 9
-")
-kable(latency_summary, caption = sprintf("Latency summary for %s measurements", report_config$iops_latency_block_size))
-```
-
-# OS Tuning Coverage
-
-The current dataset does not contain paired `standard` and `tuned` storage runs, so there is no meaningful OS tuning impact plot yet.
-
-```{r tuning-coverage}
-tuning_coverage <- sql("
-select os_tuning, count(*) as repetitions
-from fio
-where valid_measurement
-group by 1
-order by 1
-")
-kable(tuning_coverage, caption = "OS tuning coverage in valid fio repetitions")
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$throughput_block_size)}
+    and iodepth = {cfg$throughput_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(throughput_target, "storage_target", "bw_mib_per_sec", provider, "storage_target", title = sprintf("%s throughput by storage target", label), ylab = "Throughput (MiB/s)"))
+  cat("\n\n")
+
+  emit_heading(3, "Execution Configuration Impact")
+  throughput_execution_config <- provider_query(provider, glue::glue("
+  select concat(io_engine, ' / q', cast(iodepth as varchar), ' / jobs=', cast(numjobs as varchar)) as execution_config,
+         benchmark_rw_mode,
+         primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_size = {quote_sql(cfg$throughput_block_size)}
+  order by case when io_engine = 'io_uring' then 1 else 2 end, iodepth, numjobs
+  "))
+  print(metric_box(throughput_execution_config, "execution_config", "bw_mib_per_sec", provider, "execution_config", title = sprintf("%s throughput by execution configuration", label), ylab = "Throughput (MiB/s)"))
+  cat("\n\n")
+
+  emit_heading(4, "io_uring Queue Depth")
+  throughput_iouring_iodepth <- provider_query(provider, glue::glue("
+  select concat('q', cast(iodepth as varchar)) as iodepth_config, benchmark_rw_mode,
+         primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_size = {quote_sql(cfg$throughput_block_size)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(throughput_iouring_iodepth, "iodepth_config", "bw_mib_per_sec", provider, "iodepth_config", title = sprintf("%s io_uring throughput by queue depth", label), ylab = "Throughput (MiB/s)"))
+  cat("\n\n")
+
+  emit_heading(4, "psync Worker Count")
+  throughput_psync_numjobs <- provider_query(provider, glue::glue("
+  select concat('jobs=', cast(numjobs as varchar)) as numjobs_config, benchmark_rw_mode,
+         primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_size = {quote_sql(cfg$throughput_block_size)}
+    and io_engine = 'psync'
+    and iodepth = {cfg$psync_iodepth}
+  "))
+  print(metric_box(throughput_psync_numjobs, "numjobs_config", "bw_mib_per_sec", provider, "numjobs_config", title = sprintf("%s psync throughput by worker count", label), ylab = "Throughput (MiB/s)"))
+  cat("\n\n")
+
+  emit_heading(3, "Block Size Impact")
+  emit_heading(4, "Block Storage")
+  throughput_block_size <- provider_query(provider, glue::glue("
+  select block_size, benchmark_rw_mode,
+         primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and numjobs = {cfg$default_numjobs}
+    and exists (
+      select 1
+      from (values {block_size_comparison_values_sql}) as comparison(block_size, iodepth)
+      where comparison.block_size = fio.block_size
+        and comparison.iodepth = fio.iodepth
+    )
+  "))
+  print(metric_box(throughput_block_size, "block_size", "bw_mib_per_sec", provider, "block_size", title = sprintf("%s block storage throughput by block size", label), ylab = "Throughput (MiB/s)"))
+  cat("\n\n")
+
+  emit_heading(4, "Local Storage")
+  throughput_block_size_local <- provider_query(provider, glue::glue("
+  select block_size, benchmark_rw_mode,
+         primary_bw_bytes_per_sec / 1024.0 / 1024.0 as bw_mib_per_sec
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'local'
+    and storage_target_filesystem = {quote_sql(cfg$reference_local_filesystem)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and numjobs = {cfg$default_numjobs}
+    and exists (
+      select 1
+      from (values {block_size_comparison_values_sql}) as comparison(block_size, iodepth)
+      where comparison.block_size = fio.block_size
+        and comparison.iodepth = fio.iodepth
+    )
+  "))
+  print(metric_box(throughput_block_size_local, "block_size", "bw_mib_per_sec", provider, "block_size", title = sprintf("%s local storage throughput by block size", label), ylab = "Throughput (MiB/s)"))
+  cat("\n\n")
+
+  emit_heading(3, "Filesystem Impact")
+  emit_heading(4, "Block Storage")
+  render_filesystem_plot(provider, "block", "primary_bw_bytes_per_sec / 1024.0 / 1024.0", sprintf("%s block storage throughput by filesystem", label), "Throughput (MiB/s)", cfg$throughput_block_size, cfg$throughput_iodepth)
+  emit_heading(4, "Local Storage")
+  render_filesystem_plot(provider, "local", "primary_bw_bytes_per_sec / 1024.0 / 1024.0", sprintf("%s local storage throughput by filesystem", label), "Throughput (MiB/s)", cfg$throughput_block_size, cfg$throughput_iodepth)
+
+  emit_heading(2, "IOPS")
+  cat("IOPS is reported using `primary_iops`. ", filter_text(provider, "iops_latency"), "\n\n", sep = "")
+
+  emit_heading(3, "Instance Type Impact")
+  emit_heading(4, "Block Storage")
+  iops_instance <- provider_query(provider, glue::glue("
+  select benchmark_machine_type, benchmark_rw_mode, primary_iops as iops
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_volume_performance_class = {quote_sql(cfg$instance_comparison_block_performance_class)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(iops_instance, "benchmark_machine_type", "iops", provider, "benchmark_machine_type", title = sprintf("%s block storage IOPS by instance type", label), ylab = "IOPS"))
+  cat("\n\n")
+
+  emit_heading(4, "Local Storage")
+  iops_instance_local <- provider_query(provider, glue::glue("
+  select benchmark_machine_type, benchmark_rw_mode, primary_iops as iops
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and storage_target = 'local'
+    and storage_target_filesystem = {quote_sql(cfg$reference_local_filesystem)}
+    and block_volume_performance_class = {quote_sql(cfg$local_instance_comparison_block_performance_class)}
+    and benchmark_rw_mode = {quote_sql(cfg$local_instance_rw_mode)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(iops_instance_local, "benchmark_machine_type", "iops", provider, "benchmark_machine_type", title = sprintf("%s local storage IOPS by instance type", label), ylab = "IOPS", ncol = 1))
+  cat("\n\n")
+
+  emit_heading(3, "Block Storage Performance Class Impact")
+  render_performance_class_plots_provider(provider, "primary_iops", "IOPS", "IOPS", cfg$iops_latency_block_size, cfg$iops_latency_iodepth)
+
+  emit_heading(3, "Execution Configuration Impact")
+  iops_execution_config <- provider_query(provider, glue::glue("
+  select concat(io_engine, ' / q', cast(iodepth as varchar), ' / jobs=', cast(numjobs as varchar)) as execution_config,
+         benchmark_rw_mode, primary_iops as iops
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+  order by case when io_engine = 'io_uring' then 1 else 2 end, iodepth, numjobs
+  "))
+  print(metric_box(iops_execution_config, "execution_config", "iops", provider, "execution_config", title = sprintf("%s IOPS by execution configuration", label), ylab = "IOPS"))
+  cat("\n\n")
+
+  emit_heading(4, "io_uring Queue Depth")
+  iops_iouring_iodepth <- provider_query(provider, glue::glue("
+  select concat('q', cast(iodepth as varchar)) as iodepth_config, benchmark_rw_mode, primary_iops as iops
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(iops_iouring_iodepth, "iodepth_config", "iops", provider, "iodepth_config", title = sprintf("%s io_uring IOPS by queue depth", label), ylab = "IOPS"))
+  cat("\n\n")
+
+  emit_heading(4, "psync Worker Count")
+  iops_psync_numjobs <- provider_query(provider, glue::glue("
+  select concat('jobs=', cast(numjobs as varchar)) as numjobs_config, benchmark_rw_mode, primary_iops as iops
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and io_engine = 'psync'
+    and iodepth = {cfg$psync_iodepth}
+  "))
+  print(metric_box(iops_psync_numjobs, "numjobs_config", "iops", provider, "numjobs_config", title = sprintf("%s psync IOPS by worker count", label), ylab = "IOPS"))
+  cat("\n\n")
+
+  emit_heading(3, "Block Size Impact")
+  emit_heading(4, "Block Storage")
+  iops_block_size <- provider_query(provider, glue::glue("
+  select block_size, benchmark_rw_mode, primary_iops as iops
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and numjobs = {cfg$default_numjobs}
+    and exists (
+      select 1
+      from (values {block_size_comparison_values_sql}) as comparison(block_size, iodepth)
+      where comparison.block_size = fio.block_size
+        and comparison.iodepth = fio.iodepth
+    )
+  "))
+  print(metric_box(iops_block_size, "block_size", "iops", provider, "block_size", title = sprintf("%s block storage IOPS by block size", label), ylab = "IOPS"))
+  cat("\n\n")
+
+  emit_heading(4, "Local Storage")
+  iops_block_size_local <- provider_query(provider, glue::glue("
+  select block_size, benchmark_rw_mode, primary_iops as iops
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'local'
+    and storage_target_filesystem = {quote_sql(cfg$reference_local_filesystem)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and numjobs = {cfg$default_numjobs}
+    and exists (
+      select 1
+      from (values {block_size_comparison_values_sql}) as comparison(block_size, iodepth)
+      where comparison.block_size = fio.block_size
+        and comparison.iodepth = fio.iodepth
+    )
+  "))
+  print(metric_box(iops_block_size_local, "block_size", "iops", provider, "block_size", title = sprintf("%s local storage IOPS by block size", label), ylab = "IOPS"))
+  cat("\n\n")
+
+  emit_heading(3, "Storage Target Impact")
+  iops_target <- provider_query(provider, glue::glue("
+  select storage_target, benchmark_rw_mode, primary_iops as iops
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and (
+      (storage_target = 'local' and storage_target_filesystem = {quote_sql(cfg$reference_local_filesystem)}) or
+      (storage_target = 'block' and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)})
+    )
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(iops_target, "storage_target", "iops", provider, "storage_target", title = sprintf("%s IOPS by storage target", label), ylab = "IOPS"))
+  cat("\n\n")
+
+  emit_heading(3, "Filesystem Impact")
+  emit_heading(4, "Block Storage")
+  render_filesystem_plot(provider, "block", "primary_iops", sprintf("%s block storage IOPS by filesystem", label), "IOPS", cfg$iops_latency_block_size, cfg$iops_latency_iodepth)
+  emit_heading(4, "Local Storage")
+  render_filesystem_plot(provider, "local", "primary_iops", sprintf("%s local storage IOPS by filesystem", label), "IOPS", cfg$iops_latency_block_size, cfg$iops_latency_iodepth)
+
+  emit_heading(2, "Latency")
+  cat("Latency is reported in microseconds. ", filter_text(provider, "iops_latency"), "\n\n", sep = "")
+
+  emit_heading(3, "Latency Metric Overview")
+  latency_metric_overview <- provider_query(provider, glue::glue("
+  select benchmark_rw_mode, 'avg' as latency_metric, primary_clat_mean_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  union all
+  select benchmark_rw_mode, 'p50' as latency_metric, primary_clat_p50_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  union all
+  select benchmark_rw_mode, 'p99' as latency_metric, primary_clat_p99_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  union all
+  select benchmark_rw_mode, 'p99.9' as latency_metric, primary_clat_p999_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(latency_metric_overview, "latency_metric", "latency_us", provider, "latency_metric", title = sprintf("%s latency distribution by metric", label), ylab = "Latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(3, "Instance Type Impact")
+  emit_heading(4, "Block Storage")
+  emit_heading(5, "P99")
+  latency_instance <- provider_query(provider, glue::glue("
+  select benchmark_machine_type, benchmark_rw_mode,
+         primary_clat_p99_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_volume_performance_class = {quote_sql(cfg$instance_comparison_block_performance_class)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(latency_instance, "benchmark_machine_type", "latency_us", provider, "benchmark_machine_type", title = sprintf("%s block storage P99 latency by instance type", label), ylab = "P99 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(5, "P50")
+  latency_instance_p50 <- provider_query(provider, glue::glue("
+  select benchmark_machine_type, benchmark_rw_mode,
+         primary_clat_p50_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_volume_performance_class = {quote_sql(cfg$instance_comparison_block_performance_class)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(latency_instance_p50, "benchmark_machine_type", "latency_us", provider, "benchmark_machine_type", title = sprintf("%s block storage P50 latency by instance type", label), ylab = "P50 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(4, "Local Storage")
+  emit_heading(5, "P99")
+  latency_instance_local <- provider_query(provider, glue::glue("
+  select benchmark_machine_type, benchmark_rw_mode,
+         primary_clat_p99_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and storage_target = 'local'
+    and storage_target_filesystem = {quote_sql(cfg$reference_local_filesystem)}
+    and block_volume_performance_class = {quote_sql(cfg$local_instance_comparison_block_performance_class)}
+    and benchmark_rw_mode = {quote_sql(cfg$local_instance_rw_mode)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(latency_instance_local, "benchmark_machine_type", "latency_us", provider, "benchmark_machine_type", title = sprintf("%s local storage P99 latency by instance type", label), ylab = "P99 latency (us)", y_zero = FALSE, ncol = 1))
+  cat("\n\n")
+
+  emit_heading(5, "P50")
+  latency_instance_local_p50 <- provider_query(provider, glue::glue("
+  select benchmark_machine_type, benchmark_rw_mode,
+         primary_clat_p50_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and storage_target = 'local'
+    and storage_target_filesystem = {quote_sql(cfg$reference_local_filesystem)}
+    and block_volume_performance_class = {quote_sql(cfg$local_instance_comparison_block_performance_class)}
+    and benchmark_rw_mode = {quote_sql(cfg$local_instance_rw_mode)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(latency_instance_local_p50, "benchmark_machine_type", "latency_us", provider, "benchmark_machine_type", title = sprintf("%s local storage P50 latency by instance type", label), ylab = "P50 latency (us)", y_zero = FALSE, ncol = 1))
+  cat("\n\n")
+
+  emit_heading(3, "Block Storage Performance Class Impact")
+  emit_heading(4, "P99")
+  render_performance_class_plots_provider(provider, "primary_clat_p99_ns / 1000.0", "P99 latency (us)", "P99 latency", cfg$iops_latency_block_size, cfg$iops_latency_iodepth, heading_level = 5, y_zero = FALSE)
+  emit_heading(4, "P50")
+  render_performance_class_plots_provider(provider, "primary_clat_p50_ns / 1000.0", "P50 latency (us)", "P50 latency", cfg$iops_latency_block_size, cfg$iops_latency_iodepth, heading_level = 5, y_zero = FALSE)
+
+  emit_heading(3, "Execution Configuration Impact")
+  emit_heading(4, "P99")
+  latency_execution_config <- provider_query(provider, glue::glue("
+  select concat(io_engine, ' / q', cast(iodepth as varchar), ' / jobs=', cast(numjobs as varchar)) as execution_config,
+         benchmark_rw_mode,
+         primary_clat_p99_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+  order by case when io_engine = 'io_uring' then 1 else 2 end, iodepth, numjobs
+  "))
+  print(metric_box(latency_execution_config, "execution_config", "latency_us", provider, "execution_config", title = sprintf("%s P99 latency by execution configuration", label), ylab = "P99 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(5, "io_uring Queue Depth")
+  latency_iouring_iodepth <- provider_query(provider, glue::glue("
+  select concat('q', cast(iodepth as varchar)) as iodepth_config, benchmark_rw_mode,
+         primary_clat_p99_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(latency_iouring_iodepth, "iodepth_config", "latency_us", provider, "iodepth_config", title = sprintf("%s io_uring P99 latency by queue depth", label), ylab = "P99 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(5, "psync Worker Count")
+  latency_psync_numjobs <- provider_query(provider, glue::glue("
+  select concat('jobs=', cast(numjobs as varchar)) as numjobs_config, benchmark_rw_mode,
+         primary_clat_p99_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and io_engine = 'psync'
+    and iodepth = {cfg$psync_iodepth}
+  "))
+  print(metric_box(latency_psync_numjobs, "numjobs_config", "latency_us", provider, "numjobs_config", title = sprintf("%s psync P99 latency by worker count", label), ylab = "P99 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(4, "P50")
+  latency_execution_config_p50 <- provider_query(provider, glue::glue("
+  select concat(io_engine, ' / q', cast(iodepth as varchar), ' / jobs=', cast(numjobs as varchar)) as execution_config,
+         benchmark_rw_mode,
+         primary_clat_p50_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+  order by case when io_engine = 'io_uring' then 1 else 2 end, iodepth, numjobs
+  "))
+  print(metric_box(latency_execution_config_p50, "execution_config", "latency_us", provider, "execution_config", title = sprintf("%s P50 latency by execution configuration", label), ylab = "P50 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(5, "io_uring Queue Depth")
+  latency_iouring_iodepth_p50 <- provider_query(provider, glue::glue("
+  select concat('q', cast(iodepth as varchar)) as iodepth_config, benchmark_rw_mode,
+         primary_clat_p50_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(latency_iouring_iodepth_p50, "iodepth_config", "latency_us", provider, "iodepth_config", title = sprintf("%s io_uring P50 latency by queue depth", label), ylab = "P50 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(5, "psync Worker Count")
+  latency_psync_numjobs_p50 <- provider_query(provider, glue::glue("
+  select concat('jobs=', cast(numjobs as varchar)) as numjobs_config, benchmark_rw_mode,
+         primary_clat_p50_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and io_engine = 'psync'
+    and iodepth = {cfg$psync_iodepth}
+  "))
+  print(metric_box(latency_psync_numjobs_p50, "numjobs_config", "latency_us", provider, "numjobs_config", title = sprintf("%s psync P50 latency by worker count", label), ylab = "P50 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(3, "Block Size Impact")
+  emit_heading(4, "Block Storage")
+  emit_heading(5, "P99")
+  latency_block_size <- provider_query(provider, glue::glue("
+  select block_size, benchmark_rw_mode,
+         primary_clat_p99_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and numjobs = {cfg$default_numjobs}
+    and exists (
+      select 1
+      from (values {block_size_comparison_values_sql}) as comparison(block_size, iodepth)
+      where comparison.block_size = fio.block_size
+        and comparison.iodepth = fio.iodepth
+    )
+  "))
+  print(metric_box(latency_block_size, "block_size", "latency_us", provider, "block_size", title = sprintf("%s block storage P99 latency by block size", label), ylab = "P99 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(5, "P50")
+  latency_block_size_p50 <- provider_query(provider, glue::glue("
+  select block_size, benchmark_rw_mode,
+         primary_clat_p50_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'block'
+    and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and numjobs = {cfg$default_numjobs}
+    and exists (
+      select 1
+      from (values {block_size_comparison_values_sql}) as comparison(block_size, iodepth)
+      where comparison.block_size = fio.block_size
+        and comparison.iodepth = fio.iodepth
+    )
+  "))
+  print(metric_box(latency_block_size_p50, "block_size", "latency_us", provider, "block_size", title = sprintf("%s block storage P50 latency by block size", label), ylab = "P50 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(4, "Local Storage")
+  emit_heading(5, "P99")
+  latency_block_size_local <- provider_query(provider, glue::glue("
+  select block_size, benchmark_rw_mode,
+         primary_clat_p99_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'local'
+    and storage_target_filesystem = {quote_sql(cfg$reference_local_filesystem)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and numjobs = {cfg$default_numjobs}
+    and exists (
+      select 1
+      from (values {block_size_comparison_values_sql}) as comparison(block_size, iodepth)
+      where comparison.block_size = fio.block_size
+        and comparison.iodepth = fio.iodepth
+    )
+  "))
+  print(metric_box(latency_block_size_local, "block_size", "latency_us", provider, "block_size", title = sprintf("%s local storage P99 latency by block size", label), ylab = "P99 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(5, "P50")
+  latency_block_size_local_p50 <- provider_query(provider, glue::glue("
+  select block_size, benchmark_rw_mode,
+         primary_clat_p50_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and storage_target = 'local'
+    and storage_target_filesystem = {quote_sql(cfg$reference_local_filesystem)}
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and numjobs = {cfg$default_numjobs}
+    and exists (
+      select 1
+      from (values {block_size_comparison_values_sql}) as comparison(block_size, iodepth)
+      where comparison.block_size = fio.block_size
+        and comparison.iodepth = fio.iodepth
+    )
+  "))
+  print(metric_box(latency_block_size_local_p50, "block_size", "latency_us", provider, "block_size", title = sprintf("%s local storage P50 latency by block size", label), ylab = "P50 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(3, "Storage Target Impact")
+  emit_heading(4, "P99")
+  latency_target <- provider_query(provider, glue::glue("
+  select storage_target, benchmark_rw_mode,
+         primary_clat_p99_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and (
+      (storage_target = 'local' and storage_target_filesystem = {quote_sql(cfg$reference_local_filesystem)}) or
+      (storage_target = 'block' and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)})
+    )
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(latency_target, "storage_target", "latency_us", provider, "storage_target", title = sprintf("%s P99 latency by storage target", label), ylab = "P99 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(4, "P50")
+  latency_target_p50 <- provider_query(provider, glue::glue("
+  select storage_target, benchmark_rw_mode,
+         primary_clat_p50_ns / 1000.0 as latency_us
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+    and os_tuning = {quote_sql(cfg$reference_os_tuning)}
+    and benchmark_machine_type = {quote_sql(cfg$reference_machine_type)}
+    and block_volume_performance_class = {quote_sql(cfg$reference_block_performance_class)}
+    and (
+      (storage_target = 'local' and storage_target_filesystem = {quote_sql(cfg$reference_local_filesystem)}) or
+      (storage_target = 'block' and storage_target_filesystem = {quote_sql(cfg$reference_block_filesystem)})
+    )
+    and io_engine = {quote_sql(cfg$default_io_engine)}
+    and block_size = {quote_sql(cfg$iops_latency_block_size)}
+    and iodepth = {cfg$iops_latency_iodepth}
+    and numjobs = {cfg$default_numjobs}
+  "))
+  print(metric_box(latency_target_p50, "storage_target", "latency_us", provider, "storage_target", title = sprintf("%s P50 latency by storage target", label), ylab = "P50 latency (us)", y_zero = FALSE))
+  cat("\n\n")
+
+  emit_heading(3, "Filesystem Impact")
+  emit_heading(4, "Block Storage")
+  render_filesystem_plot(provider, "block", "primary_clat_p99_ns / 1000.0", sprintf("%s block storage P99 latency by filesystem", label), "P99 latency (us)", cfg$iops_latency_block_size, cfg$iops_latency_iodepth, y_zero = FALSE)
+  render_filesystem_plot(provider, "block", "primary_clat_p50_ns / 1000.0", sprintf("%s block storage P50 latency by filesystem", label), "P50 latency (us)", cfg$iops_latency_block_size, cfg$iops_latency_iodepth, y_zero = FALSE)
+  emit_heading(4, "Local Storage")
+  render_filesystem_plot(provider, "local", "primary_clat_p99_ns / 1000.0", sprintf("%s local storage P99 latency by filesystem", label), "P99 latency (us)", cfg$iops_latency_block_size, cfg$iops_latency_iodepth, y_zero = FALSE)
+  render_filesystem_plot(provider, "local", "primary_clat_p50_ns / 1000.0", sprintf("%s local storage P50 latency by filesystem", label), "P50 latency (us)", cfg$iops_latency_block_size, cfg$iops_latency_iodepth, y_zero = FALSE)
+
+  emit_heading(2, "OS Tuning Coverage")
+  tuning_coverage <- provider_query(provider, "
+  select os_tuning, count(*) as repetitions
+  from fio
+  where provider = {provider_literal}
+    and valid_measurement
+  group by 1
+  order by 1
+  ")
+  emit_table(tuning_coverage, sprintf("%s OS tuning coverage in valid fio repetitions", label))
+}
 ```
 
 # Diagnostics
 
-```{r failures}
-if (nrow(sql("select * from failures")) == 0) {
+```{r failures, echo=FALSE}
+failure_table <- sql("
+select provider, run_id, scenario_name, benchmark_name, storage_target, storage_target_filesystem,
+       repetition, fio_error, failure_reason
+from failures
+order by provider, run_id, scenario_name, benchmark_name, storage_target, repetition
+")
+if (nrow(failure_table) == 0) {
   cat("No failed fio runs were captured.")
 } else {
-  failure_table <- sql("
-  select run_id, scenario_name, benchmark_name, storage_target, repetition, fio_error, failure_reason
-  from failures
-  order by run_id, scenario_name, benchmark_name, storage_target, repetition
-  ")
-  kable(failure_table, caption = "Failed fio repetitions")
+  knitr::kable(failure_table, caption = "Failed fio repetitions")
 }
 ```
 
-```{r local-target-coverage}
+```{r local-target-coverage, echo=FALSE}
 local_summary <- sql("
-select benchmark_machine_type, block_volume_performance_class, storage_target,
-       benchmark_rw_mode, io_engine, block_size, iodepth, numjobs,
+select provider, benchmark_machine_type, block_volume_performance_class, storage_target,
+       storage_target_filesystem, benchmark_rw_mode, io_engine, block_size, iodepth, numjobs,
        iodepth * numjobs as effective_concurrency,
        sum(case when valid_measurement then 1 else 0 end) as valid_repetitions,
        sum(case when not valid_measurement then 1 else 0 end) as invalid_repetitions
 from fio
 where storage_target = 'local'
-group by 1, 2, 3, 4, 5, 6, 7, 8, 9
-order by 1, 2, 3, 4, 5, 6, 7, 8, 9
+group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+order by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
 ")
 if (nrow(local_summary) == 0) {
   cat("No local-target measurements were parsed.")
 } else {
-  kable(local_summary, caption = "Local-target coverage")
+  knitr::kable(local_summary, caption = "Local-target coverage")
 }
 ```

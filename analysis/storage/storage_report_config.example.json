@@ -1,8 +1,4 @@
 {
-  "reference_machine_type": "g2a.120d",
-  "instance_comparison_block_performance_class": "storage_premium_perf12",
-  "local_instance_comparison_block_performance_class": "storage_premium_perf6",
-  "reference_block_performance_class": "storage_premium_perf29",
   "local_instance_rw_mode": "randread",
   "default_io_engine": "io_uring",
   "throughput_block_size": "128k",
@@ -22,15 +18,13 @@
       "iodepth": 16
     }
   ],
-  "performance_class_machine_types": [
-    "g2a.8d",
-    "g2a.30d",
-    "g2a.120d"
-  ],
   "preferred_machine_order": [
     "g2a.8d",
     "g2a.30d",
-    "g2a.120d"
+    "g2a.60d",
+    "g2a.120d",
+    "c6id.32xlarge",
+    "c6id.metal"
   ],
   "preferred_workload_order": [
     "randread",
@@ -45,5 +39,40 @@
   "preferred_target_order": [
     "local",
     "block"
-  ]
+  ],
+  "preferred_filesystem_order": [
+    "raw",
+    "xfs",
+    "ext4"
+  ],
+  "provider_overrides": {
+    "stackit": {
+      "reference_machine_type": "g2a.120d",
+      "instance_comparison_block_performance_class": "storage_premium_perf12",
+      "local_instance_comparison_block_performance_class": "storage_premium_perf6",
+      "reference_block_performance_class": "storage_premium_perf29",
+      "reference_block_filesystem": "xfs",
+      "reference_local_filesystem": "xfs",
+      "reference_os_tuning": "standard",
+      "performance_class_machine_types": [
+        "g2a.8d",
+        "g2a.30d",
+        "g2a.60d",
+        "g2a.120d"
+      ]
+    },
+    "aws": {
+      "reference_machine_type": "c6id.32xlarge",
+      "instance_comparison_block_performance_class": "storage_premium_perf29",
+      "local_instance_comparison_block_performance_class": "storage_premium_perf29",
+      "reference_block_performance_class": "storage_premium_perf29",
+      "reference_block_filesystem": "xfs",
+      "reference_local_filesystem": "xfs",
+      "reference_os_tuning": "standard",
+      "performance_class_machine_types": [
+        "c6id.32xlarge",
+        "c6id.metal"
+      ]
+    }
+  }
 }

@@ -21,6 +21,12 @@ You can also pass a specific run id:
 nix develop .#analysis --command Rscript analysis/storage/build_csv.R run-20260524-002524
 ```
 
+Or build a combined dataset from selected runs:
+
+```bash
+nix develop .#analysis --command Rscript analysis/storage/build_csv.R run-20260701-113107,run-20260701-120528
+```
+
 ## Validate
 
 ```bash
@@ -38,6 +44,12 @@ Validation checks:
 
 ```bash
 nix develop .#analysis --command Rscript analysis/storage/render_storage_benchmark_analysis.R all
+```
+
+You can also render a combined report for selected runs:
+
+```bash
+nix develop .#analysis --command Rscript analysis/storage/render_storage_benchmark_analysis.R run-20260701-113107,run-20260701-120528
 ```
 
 This produces:

@@ -62,6 +62,8 @@ if (identical(result_id, "all")) {
 field_checks <- dbGetQuery(con, "
 select
   sum(case when storage_target not in ('local', 'block') then 1 else 0 end) as bad_storage_target,
+  sum(case when storage_target = 'local' and (storage_target_filesystem is null or storage_target_filesystem = '') then 1 else 0 end) as local_missing_target_filesystem,
+  sum(case when storage_target = 'block' and (storage_target_filesystem is null or storage_target_filesystem = '') then 1 else 0 end) as block_missing_target_filesystem,
   sum(case when access_pattern not in ('random', 'sequential') then 1 else 0 end) as bad_access_pattern,
   sum(case when direction not in ('read', 'write') then 1 else 0 end) as bad_direction,
   sum(case when valid_measurement and coalesce(fio_error, 0) <> 0 then 1 else 0 end) as valid_with_error,
@@ -70,6 +72,8 @@ from fio
 ")
 
 stop_if_not(field_checks$bad_storage_target == 0, "Unexpected storage_target values in fio CSV")
+stop_if_not(field_checks$local_missing_target_filesystem == 0, "Some local fio rows are missing storage_target_filesystem")
+stop_if_not(field_checks$block_missing_target_filesystem == 0, "Some block fio rows are missing storage_target_filesystem")
 stop_if_not(field_checks$bad_access_pattern == 0, "Unexpected access_pattern values in fio CSV")
 stop_if_not(field_checks$bad_direction == 0, "Unexpected direction values in fio CSV")
 stop_if_not(field_checks$valid_with_error == 0, "Some valid fio rows still carry a non-zero error code")
@@ -91,26 +95,27 @@ print(csv_counts)
 
 message("Scenarios")
 print(dbGetQuery(con, "
-select scenario_name, benchmark_machine_type, access_mode, os_tuning, storage_targets_raw, count(*) as n
+select scenario_name, benchmark_machine_type, access_mode, os_tuning, storage_targets_raw,
+       storage_local_filesystem, storage_block_filesystem, count(*) as n
 from scenarios
-group by 1, 2, 3, 4, 5
-order by 1, 2, 3, 4, 5
+group by 1, 2, 3, 4, 5, 6, 7
+order by 1, 2, 3, 4, 5, 6, 7
 "))
 
 message("Benchmarks by target and workload")
 print(dbGetQuery(con, "
-select storage_target, benchmark_tool, benchmark_rw_mode, io_engine, block_size, count(*) as n
+select storage_target, storage_target_filesystem, benchmark_tool, benchmark_rw_mode, io_engine, block_size, count(*) as n
 from benchmarks
-group by 1, 2, 3, 4, 5
-order by 1, 2, 3, 4, 5
+group by 1, 2, 3, 4, 5, 6
+order by 1, 2, 3, 4, 5, 6
 "))
 
 message("Valid fio measurements")
 print(dbGetQuery(con, "
-select storage_target, benchmark_rw_mode, io_engine, block_size, valid_measurement, count(*) as n
+select storage_target, storage_target_filesystem, benchmark_rw_mode, io_engine, block_size, valid_measurement, count(*) as n
 from fio
-group by 1, 2, 3, 4, 5
-order by 1, 2, 3, 4, 5
+group by 1, 2, 3, 4, 5, 6
+order by 1, 2, 3, 4, 5, 6
 "))
 
 message("Throughput and latency by target")

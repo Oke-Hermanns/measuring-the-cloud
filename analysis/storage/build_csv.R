@@ -95,6 +95,19 @@ env_get <- function(env, key, default = NA_character_) {
   if (is.null(value) || length(value) == 0 || is.na(value) || !nzchar(value)) default else value
 }
 
+infer_storage_filesystem <- function(explicit_value, scenario_name, mount_point = NA_character_) {
+  if (!is.na(explicit_value) && nzchar(explicit_value)) return(explicit_value)
+  scenario_name <- tolower(scenario_name %||% "")
+  mount_point <- if (is.na(mount_point)) "" else mount_point
+
+  if (grepl("ext4", scenario_name, fixed = TRUE)) return("ext4")
+  if (grepl("xfs", scenario_name, fixed = TRUE)) return("xfs")
+  if (grepl("raw", scenario_name, fixed = TRUE)) return("raw")
+  if (nzchar(mount_point)) return("xfs")
+  if (grepl("standard", scenario_name, fixed = TRUE)) return("xfs")
+  NA_character_
+}
+
 parse_size_bytes <- function(x) {
   if (is.null(x) || is.na(x) || !nzchar(x)) return(NA_real_)
   x <- toupper(trimws(as.character(x)))
@@ -175,14 +188,16 @@ scenario_fields <- c(
   "run_id", "scenario_name", "provider", "access_mode", "os_tuning", "benchmark_host",
   "benchmark_private_ip", "ssh_user", "benchmark_cpu_list", "benchmark_machine_type",
   "benchmark_availability_zone", "block_volume_performance_class", "storage_targets_raw", "storage_root_device",
-  "storage_local_device", "storage_local_mount", "storage_block_device", "storage_block_mount",
+  "storage_local_device", "storage_local_mount", "storage_local_filesystem",
+  "storage_block_device", "storage_block_mount", "storage_block_filesystem",
   "scenario_source_file", "storage_env_file"
 )
 
 benchmark_fields <- c(
   scenario_fields,
   "benchmark_name", "benchmark_source_file", "storage_target", "storage_target_mount",
-  "storage_target_device", "benchmark_tool", "benchmark_rw_mode", "access_pattern", "direction",
+  "storage_target_device", "storage_target_filesystem", "benchmark_tool",
+  "benchmark_rw_mode", "access_pattern", "direction",
   "io_engine", "block_size", "block_size_bytes", "iodepth", "numjobs", "runtime_sec", "direct",
   "group_reporting", "time_based", "fio_size", "repetitions_expected", "cooldown_sec"
 )
@@ -216,6 +231,18 @@ failure_fields <- c(
 
 scenario_row <- function(run_id, scenario_name, scenario_env, storage_env, scenario_dir) {
   storage_targets <- env_get(scenario_env, "STORAGE_TARGETS", env_get(storage_env, "STORAGE_TARGETS"))
+  storage_local_mount <- env_get(scenario_env, "STORAGE_LOCAL_MOUNT", env_get(storage_env, "STORAGE_LOCAL_MOUNT"))
+  storage_block_mount <- env_get(scenario_env, "STORAGE_BLOCK_MOUNT", env_get(storage_env, "STORAGE_BLOCK_MOUNT"))
+  storage_local_filesystem <- infer_storage_filesystem(
+    env_get(scenario_env, "STORAGE_LOCAL_FILESYSTEM", env_get(storage_env, "STORAGE_LOCAL_FILESYSTEM")),
+    scenario_name,
+    storage_local_mount
+  )
+  storage_block_filesystem <- infer_storage_filesystem(
+    env_get(scenario_env, "STORAGE_BLOCK_FILESYSTEM", env_get(storage_env, "STORAGE_BLOCK_FILESYSTEM")),
+    scenario_name,
+    storage_block_mount
+  )
   data.frame(
     run_id = run_id,
     scenario_name = scenario_name,
@@ -235,9 +262,11 @@ scenario_row <- function(run_id, scenario_name, scenario_env, storage_env, scena
     storage_targets_raw = storage_targets,
     storage_root_device = env_get(scenario_env, "STORAGE_ROOT_DEVICE", env_get(storage_env, "STORAGE_ROOT_DEVICE")),
     storage_local_device = env_get(scenario_env, "STORAGE_LOCAL_DEVICE", env_get(storage_env, "STORAGE_LOCAL_DEVICE")),
-    storage_local_mount = env_get(scenario_env, "STORAGE_LOCAL_MOUNT", env_get(storage_env, "STORAGE_LOCAL_MOUNT")),
+    storage_local_mount = storage_local_mount,
+    storage_local_filesystem = storage_local_filesystem,
     storage_block_device = env_get(scenario_env, "STORAGE_BLOCK_DEVICE", env_get(storage_env, "STORAGE_BLOCK_DEVICE")),
-    storage_block_mount = env_get(scenario_env, "STORAGE_BLOCK_MOUNT", env_get(storage_env, "STORAGE_BLOCK_MOUNT")),
+    storage_block_mount = storage_block_mount,
+    storage_block_filesystem = storage_block_filesystem,
     scenario_source_file = file.path(scenario_dir, "scenario.env"),
     storage_env_file = file.path(scenario_dir, "storage.env"),
     stringsAsFactors = FALSE
@@ -246,6 +275,25 @@ scenario_row <- function(run_id, scenario_name, scenario_env, storage_env, scena
 
 benchmark_row <- function(run_id, scenario_name, scenario_env, storage_env, benchmark_name, storage_target, benchmark_env, benchmark_dir, scenario_dir) {
   rw_mode <- env_get(benchmark_env, "FIO_RW")
+  storage_local_mount <- env_get(scenario_env, "STORAGE_LOCAL_MOUNT", env_get(storage_env, "STORAGE_LOCAL_MOUNT"))
+  storage_block_mount <- env_get(scenario_env, "STORAGE_BLOCK_MOUNT", env_get(storage_env, "STORAGE_BLOCK_MOUNT"))
+  storage_local_filesystem <- infer_storage_filesystem(
+    env_get(scenario_env, "STORAGE_LOCAL_FILESYSTEM", env_get(storage_env, "STORAGE_LOCAL_FILESYSTEM")),
+    scenario_name,
+    storage_local_mount
+  )
+  storage_block_filesystem <- infer_storage_filesystem(
+    env_get(scenario_env, "STORAGE_BLOCK_FILESYSTEM", env_get(storage_env, "STORAGE_BLOCK_FILESYSTEM")),
+    scenario_name,
+    storage_block_mount
+  )
+  storage_target_filesystem <- if (identical(storage_target, "local")) {
+    storage_local_filesystem
+  } else if (identical(storage_target, "block")) {
+    storage_block_filesystem
+  } else {
+    NA_character_
+  }
   data.frame(
     run_id = run_id,
     scenario_name = scenario_name,
@@ -265,9 +313,11 @@ benchmark_row <- function(run_id, scenario_name, scenario_env, storage_env, benc
     storage_targets_raw = env_get(scenario_env, "STORAGE_TARGETS", env_get(storage_env, "STORAGE_TARGETS")),
     storage_root_device = env_get(scenario_env, "STORAGE_ROOT_DEVICE", env_get(storage_env, "STORAGE_ROOT_DEVICE")),
     storage_local_device = env_get(scenario_env, "STORAGE_LOCAL_DEVICE", env_get(storage_env, "STORAGE_LOCAL_DEVICE")),
-    storage_local_mount = env_get(scenario_env, "STORAGE_LOCAL_MOUNT", env_get(storage_env, "STORAGE_LOCAL_MOUNT")),
+    storage_local_mount = storage_local_mount,
+    storage_local_filesystem = storage_local_filesystem,
     storage_block_device = env_get(scenario_env, "STORAGE_BLOCK_DEVICE", env_get(storage_env, "STORAGE_BLOCK_DEVICE")),
-    storage_block_mount = env_get(scenario_env, "STORAGE_BLOCK_MOUNT", env_get(storage_env, "STORAGE_BLOCK_MOUNT")),
+    storage_block_mount = storage_block_mount,
+    storage_block_filesystem = storage_block_filesystem,
     scenario_source_file = file.path(scenario_dir, "scenario.env"),
     storage_env_file = file.path(scenario_dir, "storage.env"),
     benchmark_name = benchmark_name,
@@ -275,6 +325,7 @@ benchmark_row <- function(run_id, scenario_name, scenario_env, storage_env, benc
     storage_target = storage_target,
     storage_target_mount = env_get(benchmark_env, "STORAGE_TARGET_MOUNT"),
     storage_target_device = env_get(benchmark_env, "STORAGE_TARGET_DEVICE"),
+    storage_target_filesystem = storage_target_filesystem,
     benchmark_tool = env_get(benchmark_env, "BENCHMARK_TOOL"),
     benchmark_rw_mode = rw_mode,
     access_pattern = access_pattern_for_rw(rw_mode),
@@ -495,6 +546,16 @@ parse_storage_run <- function(repo_root, run_id) {
 discover_run_ids <- function(repo_root, result_id) {
   storage_root <- file.path(repo_root, "artifacts", "storage")
   if (!dir.exists(storage_root)) return(character(0))
+  if (grepl(",", result_id, fixed = TRUE)) {
+    run_ids <- trimws(unlist(strsplit(result_id, ",", fixed = TRUE)))
+    run_ids <- run_ids[nzchar(run_ids)]
+    if (length(run_ids) == 0) stop("No storage run ids were provided")
+    missing_run_ids <- run_ids[!dir.exists(file.path(storage_root, run_ids))]
+    if (length(missing_run_ids) > 0) {
+      stop(sprintf("Storage run(s) not found: %s", paste(missing_run_ids, collapse = ", ")))
+    }
+    return(unique(run_ids))
+  }
   if (!identical(result_id, "all")) {
     run_dir <- file.path(storage_root, result_id)
     if (!dir.exists(run_dir)) stop(sprintf("Storage run not found: %s", run_dir))
