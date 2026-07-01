@@ -20,9 +20,7 @@ intentional: this folder is the stable "run everything" entry point.
 It also includes the representative filesystem-backed scenarios from
 `../filesystem/`:
 
-- local-only on `xfs`
-- block-only on `xfs` for the top perf29 profile
+- combined local `raw` plus block `raw` on the same VM
 - combined local `xfs` plus block `xfs` on the same VM
 
-The raw-only filesystem scenarios are not duplicated here because the main
-matrix already covers raw runs.
+The filesystem subset contributes only the combined representative scenarios.

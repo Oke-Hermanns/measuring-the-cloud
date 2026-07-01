@@ -1,20 +1,18 @@
 # STACKIT Filesystem Scenarios
 
 This folder keeps a small explicit compatibility subset for filesystem-backed
-storage benchmarks while the broader STACKIT scenario matrix defaults to
-`raw`.
+storage benchmarks while the broader STACKIT scenario matrix continues to
+cover the `raw` path.
 
 The representative scenarios use the largest local-storage shape and the
 highest attached block profile already modeled in the repo, with `xfs` as the
-aligned filesystem-backed choice for PostgreSQL-oriented runs:
+aligned filesystem-backed choice for PostgreSQL-oriented runs. The
+filesystem-backed coverage is consolidated into one combined scenario that
+benchmarks both the instance-local target and the attached block target on the
+same VM:
 
-- local: `g2a.120d`
-- block: `g2a.120d` with `storage_premium_perf29`
+- combined local `raw` plus block `raw`: `g2a.120d` with `storage_premium_perf29`
+- combined local `xfs` plus block `xfs`: `g2a.120d` with `storage_premium_perf29`
 
-Each target has both a `raw` and a filesystem-backed variant so you can test
-transition behavior and compare mounted-filesystem overhead without running the
-full historical matrix.
-
-The folder also includes one combined filesystem-backed scenario that exercises
-the `all`-style case where both the local instance-local target and the
-attached block target are benchmarked on the same VM.
+This folder is intentionally limited to the combined representative scenarios:
+one `raw/raw` variant and one `xfs/xfs` variant.
