@@ -93,11 +93,6 @@ disk_size_gib() {
   echo 0
 }
 
-disk_mountpoints() {
-  local device="$1"
-  lsblk -nr -o MOUNTPOINT "$${device}" 2>/dev/null | sed '/^$/d' || true
-}
-
 disk_udev_property() {
   local device="$1"
   local key="$2"
@@ -118,16 +113,6 @@ disk_is_block_candidate() {
   label="$(disk_udev_property "$${device}" ID_FS_LABEL)"
 
   [[ -n "$${serial}" ]] && [[ "$${label}" != "ephemeral0" ]]
-}
-
-unmount_disk_mountpoints() {
-  local device="$1"
-  local mountpoint
-  disk_mountpoints "$${device}" | sort -r | while read -r mountpoint; do
-    [[ -n "$${mountpoint}" ]] || continue
-    log "unmounting existing mount $${mountpoint} from $${device}"
-    umount "$${mountpoint}"
-  done
 }
 
 list_non_root_whole_disks() {
@@ -262,32 +247,6 @@ wait_for_block_volume() {
   fi
 }
 
-prepare_mount() {
-  local device="$1"
-  local mount_point="$2"
-  local fstype="$${3:-ext4}"
-
-  [[ -n "$${device}" ]] || return 0
-
-  mkdir -p "$${mount_point}"
-
-  if ! blkid "$${device}" >/dev/null 2>&1; then
-    log "formatting $${device} as $${fstype}"
-    if [[ "$${fstype}" == "xfs" ]]; then
-      mkfs.xfs -f "$${device}"
-    else
-      mkfs.ext4 -F "$${device}"
-    fi
-  fi
-
-  mount "$${device}" "$${mount_point}"
-  chown ubuntu:ubuntu "$${mount_point}"
-
-  local uuid
-  uuid="$(blkid -s UUID -o value "$${device}")"
-  grep -q "$${uuid}" /etc/fstab || echo "UUID=$${uuid} $${mount_point} $${fstype} defaults,nofail 0 2" >> /etc/fstab
-}
-
 storage_targets=()
 
 local_disk_size_gib="${benchmark_local_disk_size_gib}"
@@ -305,9 +264,7 @@ if [[ "$${local_disk_size_gib}" =~ ^[0-9]+$ ]] && (( local_disk_size_gib > 0 ));
   local_device="$(wait_for_local_disk "$${local_disk_size_gib}")"
 
   if [[ -n "$${local_device}" ]]; then
-    log "preparing STACKIT instance-local storage device $${local_device} ($(disk_size_gib "$${local_device}") GiB)"
-    unmount_disk_mountpoints "$${local_device}"
-    prepare_mount "$${local_device}" "$${local_mount_point}" "$${local_filesystem}"
+    log "discovered STACKIT instance-local storage device $${local_device} ($(disk_size_gib "$${local_device}") GiB)"
     storage_targets+=("local")
   else
     log "no $${local_disk_size_gib} GiB local disk was discovered"
@@ -318,9 +275,7 @@ if [[ "$${block_volume_size_gib}" =~ ^[0-9]+$ ]] && (( block_volume_size_gib > 0
   block_device="$(wait_for_block_volume "$${block_volume_size_gib}")"
 
   if [[ -n "$${block_device}" ]]; then
-    log "preparing STACKIT block-volume storage device $${block_device} ($(disk_size_gib "$${block_device}") GiB)"
-    unmount_disk_mountpoints "$${block_device}"
-    prepare_mount "$${block_device}" "$${block_mount_point}" "$${block_filesystem}"
+    log "discovered STACKIT block-volume storage device $${block_device} ($(disk_size_gib "$${block_device}") GiB)"
     storage_targets+=("block")
   else
     log "no $${block_volume_size_gib} GiB attached block volume was discovered"

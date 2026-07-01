@@ -88,21 +88,6 @@ disk_size_gib() {
   echo 0
 }
 
-disk_mountpoints() {
-  local device="$1"
-  lsblk -nr -o MOUNTPOINT "$${device}" 2>/dev/null | sed '/^$/d' || true
-}
-
-unmount_disk_mountpoints() {
-  local device="$1"
-  local mountpoint
-  disk_mountpoints "$${device}" | sort -r | while read -r mountpoint; do
-    [[ -n "$${mountpoint}" ]] || continue
-    log "unmounting existing mount $${mountpoint} from $${device}"
-    umount "$${mountpoint}"
-  done
-}
-
 disk_model() {
   local device="$1"
   local name
@@ -144,32 +129,6 @@ wait_for_instance_store_disk() {
   done
 }
 
-prepare_mount() {
-  local device="$1"
-  local mount_point="$2"
-  local fstype="$${3:-ext4}"
-
-  [[ -n "$${device}" ]] || return 0
-
-  mkdir -p "$${mount_point}"
-
-  if ! blkid "$${device}" >/dev/null 2>&1; then
-    log "formatting $${device} as $${fstype}"
-    if [[ "$${fstype}" == "xfs" ]]; then
-      mkfs.xfs -f "$${device}"
-    else
-      mkfs.ext4 -F "$${device}"
-    fi
-  fi
-
-  mount "$${device}" "$${mount_point}"
-  chown ubuntu:ubuntu "$${mount_point}"
-
-  local uuid
-  uuid="$(blkid -s UUID -o value "$${device}")"
-  grep -q "$${uuid}" /etc/fstab || echo "UUID=$${uuid} $${mount_point} $${fstype} defaults,nofail 0 2" >> /etc/fstab
-}
-
 wait_for_ebs_volume() {
   local volume_id="$1"
   local attempts="$${2:-60}"
@@ -208,9 +167,7 @@ if [[ "$${local_storage}" == "auto" ]]; then
   local_device="$(wait_for_instance_store_disk)"
 
   if [[ -n "$${local_device}" ]]; then
-    log "preparing AWS instance-store device $${local_device} ($(disk_size_gib "$${local_device}") GiB)"
-    unmount_disk_mountpoints "$${local_device}"
-    prepare_mount "$${local_device}" "$${local_mount_point}" "$${local_filesystem}"
+    log "discovered AWS instance-store device $${local_device} ($(disk_size_gib "$${local_device}") GiB)"
     storage_targets+=("local")
   else
     log "no AWS instance-store device was discovered"
@@ -223,9 +180,7 @@ if [[ "$${block_volume_size_gib}" =~ ^[0-9]+$ ]] && (( block_volume_size_gib > 0
   block_device="$(wait_for_ebs_volume "$${block_volume_id}")"
 
   if [[ -n "$${block_device}" ]]; then
-    log "preparing AWS EBS block-volume device $${block_device} ($(disk_size_gib "$${block_device}") GiB) for volume $${block_volume_id}"
-    unmount_disk_mountpoints "$${block_device}"
-    prepare_mount "$${block_device}" "$${block_mount_point}" "$${block_filesystem}"
+    log "discovered AWS EBS block-volume device $${block_device} ($(disk_size_gib "$${block_device}") GiB) for volume $${block_volume_id}"
     storage_targets+=("block")
   else
     log "no EBS block volume device was discovered for volume $${block_volume_id}"

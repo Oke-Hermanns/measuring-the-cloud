@@ -1,6 +1,6 @@
 # Cloud Measuring
 
-Lean benchmark framework for comparing cloud network and storage performance.
+Benchmark framework for comparing cloud network and storage performance.
 
 The current implemented slices are STACKIT and AWS network and storage
 benchmarks. STACKIT also has a persistent benchmark runner VM path for
@@ -107,8 +107,8 @@ BENCHMARK_DIR=storage/benchmarks/full
 The selected scenario file can override cloud dimensions such as instance type,
 availability zone, OS tuning, affinity, root volume size, or attached block
 volume performance class. Storage scenarios can also set
-`LOCAL_FILESYSTEM` and `BLOCK_FILESYSTEM` to make target filesystems explicit;
-both support `ext4` and `xfs`.
+`LOCAL_FILESYSTEM` and `BLOCK_FILESYSTEM` to make target configuration
+explicit; both support `ext4`, `xfs`, and `raw`.
 
 Set `SKIP=1` to keep a scenario file in the directory without running it.
 

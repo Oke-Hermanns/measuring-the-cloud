@@ -1,6 +1,9 @@
 # Storage PostgreSQL-WAL Scenarios
 
-This folder contains the most relevant storage scenario for PostgreSQL style WAL workloads.
+This folder contains the most relevant storage scenario for PostgreSQL style
+WAL workloads. It now inherits the repo-wide raw-default target config unless
+explicitly overridden; when filesystem-backed representative runs are needed,
+the repo aligns them on `xfs`.
 
 Use this folder when you want the full storage benchmark matrix:
 
@@ -12,4 +15,4 @@ Use this folder when you want the full storage benchmark matrix:
 ```
 
 The files may overlap with focused subset folders.
-The main difference the execute benchmark configuration
+The main difference is the benchmark configuration.

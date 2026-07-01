@@ -107,12 +107,12 @@ run_scenario() {
   LOCAL_FILESYSTEM="${LOCAL_FILESYSTEM:-xfs}"
   BLOCK_FILESYSTEM="${BLOCK_FILESYSTEM:-ext4}"
   case "$LOCAL_FILESYSTEM" in
-    ext4|xfs) ;;
-    *) die "${scenario_file}: LOCAL_FILESYSTEM must be one of: ext4, xfs" ;;
+    ext4|xfs|raw) ;;
+    *) die "${scenario_file}: LOCAL_FILESYSTEM must be one of: ext4, xfs, raw" ;;
   esac
   case "$BLOCK_FILESYSTEM" in
-    ext4|xfs) ;;
-    *) die "${scenario_file}: BLOCK_FILESYSTEM must be one of: ext4, xfs" ;;
+    ext4|xfs|raw) ;;
+    *) die "${scenario_file}: BLOCK_FILESYSTEM must be one of: ext4, xfs, raw" ;;
   esac
   BENCHMARK_ROOT_VOLUME_SIZE_GIB="${BENCHMARK_ROOT_VOLUME_SIZE_GIB:-30}"
   BENCHMARK_ROOT_VOLUME_PERFORMANCE_CLASS="${BENCHMARK_ROOT_VOLUME_PERFORMANCE_CLASS:-}"
@@ -196,6 +196,8 @@ run_scenario() {
       --benchmark-dir "$BENCHMARK_DIR" \
       --os-tuning "$OS_TUNING" \
       --access-mode "$ACCESS_MODE" \
+      --local-filesystem "$LOCAL_FILESYSTEM" \
+      --block-filesystem "$BLOCK_FILESYSTEM" \
       --local-log-dir "$LOCAL_RUN_DIR" \
       --run-id "$RUN_ID" \
       "${benchmark_args[@]}" || bench_rc=$?

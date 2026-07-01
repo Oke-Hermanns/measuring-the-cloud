@@ -13,11 +13,13 @@ OS_TUNING="standard"
 LOCAL_LOG_DIR=""
 REMOTE_RESULTS_ROOT="/opt/cloud-measuring/results"
 ACCESS_MODE="public"
+LOCAL_FILESYSTEM=""
+BLOCK_FILESYSTEM=""
 declare -a BENCHMARK_NAMES=()
 
 usage() {
   cat >&2 <<USAGE
-usage: $0 --tofu-dir PATH --scenario-name NAME --benchmark-dir PATH --run-id ID [--local-log-dir PATH] [--os-tuning standard|tuned] [--access-mode public|private] [--benchmark NAME]
+usage: $0 --tofu-dir PATH --scenario-name NAME --benchmark-dir PATH --run-id ID --local-filesystem ext4|xfs|raw --block-filesystem ext4|xfs|raw [--local-log-dir PATH] [--os-tuning standard|tuned] [--access-mode public|private] [--benchmark NAME]
 USAGE
 }
 
@@ -30,6 +32,8 @@ while [[ $# -gt 0 ]]; do
     --local-log-dir) LOCAL_LOG_DIR="$2"; shift 2 ;;
     --os-tuning) OS_TUNING="$2"; shift 2 ;;
     --access-mode) ACCESS_MODE="$2"; shift 2 ;;
+    --local-filesystem) LOCAL_FILESYSTEM="$2"; shift 2 ;;
+    --block-filesystem) BLOCK_FILESYSTEM="$2"; shift 2 ;;
     --results-root) REMOTE_RESULTS_ROOT="$2"; shift 2 ;;
     --benchmark) BENCHMARK_NAMES+=("$2"); shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -41,6 +45,8 @@ done
 [[ -n "$SCENARIO_NAME" ]] || { usage; exit 1; }
 [[ -n "$BENCHMARK_DIR" ]] || { usage; exit 1; }
 [[ -n "$RUN_ID" ]] || { usage; exit 1; }
+[[ -n "$LOCAL_FILESYSTEM" ]] || { usage; exit 1; }
+[[ -n "$BLOCK_FILESYSTEM" ]] || { usage; exit 1; }
 case "$OS_TUNING" in
   standard|tuned) ;;
   *) die "--os-tuning must be one of: standard, tuned" ;;
@@ -48,6 +54,14 @@ esac
 case "$ACCESS_MODE" in
   public|private) ;;
   *) die "--access-mode must be one of: public, private" ;;
+esac
+case "$LOCAL_FILESYSTEM" in
+  ext4|xfs|raw) ;;
+  *) die "--local-filesystem must be one of: ext4, xfs, raw" ;;
+esac
+case "$BLOCK_FILESYSTEM" in
+  ext4|xfs|raw) ;;
+  *) die "--block-filesystem must be one of: ext4, xfs, raw" ;;
 esac
 
 cd "$REPO_ROOT"
@@ -76,6 +90,8 @@ SSH_KEY="$(expand_home "$(tofu_output_raw "$tofu" "$TOFU_DIR" ssh_private_key_pa
 SSH_USER="$(tofu_output_raw "$tofu" "$TOFU_DIR" benchmark_ssh_user)"
 BENCHMARK_MACHINE_TYPE="$(tofu_output_raw "$tofu" "$TOFU_DIR" benchmark_machine_type)"
 BENCHMARK_AVAILABILITY_ZONE="$(tofu_output_raw "$tofu" "$TOFU_DIR" benchmark_availability_zone)"
+BENCHMARK_LOCAL_MOUNT_POINT="$(tofu_output_raw "$tofu" "$TOFU_DIR" benchmark_local_mount_point)"
+BENCHMARK_BLOCK_MOUNT_POINT="$(tofu_output_raw "$tofu" "$TOFU_DIR" benchmark_block_mount_point)"
 require_file "$SSH_KEY"
 
 if [[ "$ACCESS_MODE" == "private" ]]; then
@@ -94,6 +110,7 @@ fi
 REMOTE_SCENARIO_DIR="${REMOTE_RESULTS_ROOT}/${RUN_ID}/${SCENARIO_NAME}"
 REMOTE_BIN_DIR="/opt/cloud-measuring/bin"
 REMOTE_STORAGE_ENV="/opt/cloud-measuring/state/storage.env"
+REMOTE_STORAGE_PREPARE_LOG=""
 
 ssh_run() {
   local host="$1"
@@ -236,17 +253,24 @@ push_remote_scripts() {
   ssh_run "$BENCHMARK_HOST" "mkdir -p '${REMOTE_BIN_DIR}' '${REMOTE_SCENARIO_DIR}'"
   scp_to "${REPO_ROOT}/storage/remote/run_fio.sh" "$BENCHMARK_HOST" "${REMOTE_BIN_DIR}/run_fio.sh"
   scp_to "${REPO_ROOT}/storage/remote/run_benchmarks.sh" "$BENCHMARK_HOST" "${REMOTE_BIN_DIR}/run_benchmarks.sh"
-  ssh_run "$BENCHMARK_HOST" "chmod +x '${REMOTE_BIN_DIR}/run_fio.sh' '${REMOTE_BIN_DIR}/run_benchmarks.sh'"
+  scp_to "${REPO_ROOT}/storage/remote/prepare_storage_target.sh" "$BENCHMARK_HOST" "${REMOTE_BIN_DIR}/prepare_storage_target.sh"
+  ssh_run "$BENCHMARK_HOST" "chmod +x '${REMOTE_BIN_DIR}/run_fio.sh' '${REMOTE_BIN_DIR}/run_benchmarks.sh' '${REMOTE_BIN_DIR}/prepare_storage_target.sh'"
 }
 
 discover_storage_env() {
   local tmp
   tmp="$(mktemp /tmp/cloud-measuring-storage-env.XXXXXX)"
   ssh_run "$BENCHMARK_HOST" "cat '${REMOTE_STORAGE_ENV}'" >"$tmp"
+  unset STORAGE_TARGETS STORAGE_ROOT_DEVICE STORAGE_LOCAL_DEVICE STORAGE_LOCAL_MOUNT STORAGE_LOCAL_FILESYSTEM STORAGE_BLOCK_DEVICE STORAGE_BLOCK_MOUNT STORAGE_BLOCK_FILESYSTEM
   # shellcheck disable=SC1090
   source "$tmp"
   rm -f "$tmp"
   [[ -n "${STORAGE_TARGETS:-}" ]] || die "no storage targets discovered on benchmark host"
+}
+
+reconcile_storage_targets() {
+  REMOTE_STORAGE_PREPARE_LOG="${REMOTE_SCENARIO_DIR}/storage-prepare.log"
+  ssh_run "$BENCHMARK_HOST" "mkdir -p '${REMOTE_SCENARIO_DIR}' && sudo '${REMOTE_BIN_DIR}/prepare_storage_target.sh' --storage-env '${REMOTE_STORAGE_ENV}' --local-mount-point '${BENCHMARK_LOCAL_MOUNT_POINT}' --local-filesystem '${LOCAL_FILESYSTEM}' --block-mount-point '${BENCHMARK_BLOCK_MOUNT_POINT}' --block-filesystem '${BLOCK_FILESYSTEM}' >'${REMOTE_STORAGE_PREPARE_LOG}' 2>&1"
 }
 
 write_remote_metadata() {
@@ -282,11 +306,11 @@ run_one_fio_repetition() {
   local remote_rep_dir="$1"
   local target_mount="$2"
   local target_device="$3"
+  local target_filesystem="$4"
   ssh_run "$BENCHMARK_HOST" "mkdir -p '${remote_rep_dir}'"
 
   local fio_cmd=(
     "${REMOTE_BIN_DIR}/run_fio.sh"
-    --mount-point "$target_mount"
     --out-dir "$remote_rep_dir"
     --name "$BENCHMARK_NAME"
     --ioengine "$FIO_IOENGINE"
@@ -300,6 +324,12 @@ run_one_fio_repetition() {
     --time-based "$FIO_TIME_BASED"
     --cpu-list "$BENCHMARK_CPU_LIST"
   )
+  if [[ "$target_filesystem" == "raw" ]]; then
+    fio_cmd=(sudo "${fio_cmd[@]}")
+    fio_cmd+=(--device "$target_device")
+  else
+    fio_cmd+=(--mount-point "$target_mount")
+  fi
   if [[ -n "${FIO_SIZE:-}" ]]; then
     fio_cmd+=(--size "$FIO_SIZE")
   fi
@@ -325,7 +355,7 @@ run_repetitions() {
   local rep
   for rep in $(seq 1 "$REPETITIONS"); do
     log "running benchmark ${BENCHMARK_NAME} target ${target_name} repetition ${rep}/${REPETITIONS}"
-    run_one_fio_repetition "${remote_target_dir}/rep-${rep}" "$target_mount" "$target_device"
+    run_one_fio_repetition "${remote_target_dir}/rep-${rep}" "$target_mount" "$target_device" "$target_filesystem"
     if (( rep < REPETITIONS )); then
       sleep "$COOLDOWN_SEC"
     fi
@@ -378,7 +408,10 @@ run_fio_benchmark() {
     target_mount="${!target_mount_var:-}"
     target_device="${!target_device_var:-}"
     target_filesystem="${!target_filesystem_var:-}"
-    [[ -n "$target_mount" ]] || continue
+    [[ -n "$target_device" ]] || continue
+    if [[ "$target_filesystem" != "raw" && -z "$target_mount" ]]; then
+      continue
+    fi
     remote_target_dir="${REMOTE_SCENARIO_DIR}/benchmarks/${BENCHMARK_NAME}/${target_name}"
     run_repetitions "$remote_target_dir" "$target_name" "$target_mount" "$target_device" "$target_filesystem"
   done
@@ -392,6 +425,8 @@ apply_os_tuning benchmark
 BENCHMARK_CPU_LIST="$(remote_cpu_list)"
 log "benchmark CPU list: ${BENCHMARK_CPU_LIST}"
 push_remote_scripts
+discover_storage_env
+reconcile_storage_targets
 discover_storage_env
 write_remote_metadata
 ssh_run "$BENCHMARK_HOST" "mkdir -p '${REMOTE_SCENARIO_DIR}'"

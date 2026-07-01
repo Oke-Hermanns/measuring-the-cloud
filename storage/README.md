@@ -1,7 +1,8 @@
 # Storage Benchmarks
 
-The storage runner provisions one benchmark VM per scenario, prepares the
-available storage targets on that VM, runs `fio` benchmark files on the
+The storage runner provisions one benchmark VM per scenario, discovers the
+available storage targets on that VM, reconciles them to the scenario config,
+runs `fio` benchmark files on the
 discovered targets, fetches the raw artifacts, and then destroys the
 infrastructure according to the selected destroy policy.
 
@@ -99,8 +100,8 @@ BENCHMARK_MACHINE_TYPE=g2a.30d
 BENCHMARK_IMAGE_ID=7b10e105-295b-4369-b6e0-567ec940a02b
 BLOCK_VOLUME_SIZE_GIB=300
 BLOCK_VOLUME_PERFORMANCE_CLASS=storage_premium_perf6
-LOCAL_FILESYSTEM=xfs
-BLOCK_FILESYSTEM=ext4
+LOCAL_FILESYSTEM=raw
+BLOCK_FILESYSTEM=raw
 SKIP=0
 ```
 
@@ -108,10 +109,11 @@ SKIP=0
 `BLOCK_VOLUME_SIZE_GIB=0` disables the additional benchmark block volume; the
 root volume is still provisioned as the VM boot disk.
 
-`LOCAL_FILESYSTEM` and `BLOCK_FILESYSTEM` make the formatted filesystem part of
-the scenario contract. Supported values are `ext4` and `xfs`. Defaults preserve
-the historical behavior: local storage uses `xfs`, and attached block storage
-uses `ext4`.
+`LOCAL_FILESYSTEM` and `BLOCK_FILESYSTEM` make the target configuration part of
+the scenario contract. Supported values are `ext4`, `xfs`, and `raw`. `raw`
+means direct device benchmarking with no filesystem or mountpoint. The current
+scenario matrix defaults to `raw`; explicit filesystem-backed representative
+scenarios live under each provider's `filesystem/` folder.
 
 Approximate block-storage pairings used by the AWS scenario matrix:
 
@@ -164,5 +166,7 @@ For the `psync` latency profiles, use the same shape with
 The runner automatically wraps the command with `taskset`, uses all CPUs
 except CPU 0 when possible, and skips the root volume. Storage targets are
 discovered from the benchmark VM and written to a small env file on the host.
-The selected target filesystem is copied into `storage.env`, `scenario.env`,
+Before each scenario run, the runner reconciles each target to the requested
+configuration, including transitions between mounted filesystems and `raw`.
+The selected target configuration is copied into `storage.env`, `scenario.env`,
 and each benchmark's `benchmark.env`.

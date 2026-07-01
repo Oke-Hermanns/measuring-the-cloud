@@ -2,6 +2,7 @@
 set -euo pipefail
 
 MOUNT_POINT=""
+DEVICE=""
 OUT_DIR=""
 NAME="fio-benchmark"
 IOENGINE="io_uring"
@@ -28,13 +29,14 @@ default_cpu_list() {
 
 usage() {
   cat >&2 <<USAGE
-usage: $0 --mount-point PATH --out-dir PATH [--name NAME] [--ioengine NAME] [--rw MODE] [--bs SIZE] [--iodepth N] [--numjobs N] [--runtime-sec N] [--direct 0|1] [--group-reporting 0|1] [--time-based 0|1] [--size SIZE] [--cpu-list LIST]
+usage: $0 (--mount-point PATH | --device PATH) --out-dir PATH [--name NAME] [--ioengine NAME] [--rw MODE] [--bs SIZE] [--iodepth N] [--numjobs N] [--runtime-sec N] [--direct 0|1] [--group-reporting 0|1] [--time-based 0|1] [--size SIZE] [--cpu-list LIST]
 USAGE
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mount-point) MOUNT_POINT="$2"; shift 2 ;;
+    --device) DEVICE="$2"; shift 2 ;;
     --out-dir) OUT_DIR="$2"; shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
     --ioengine) IOENGINE="$2"; shift 2 ;;
@@ -53,7 +55,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$MOUNT_POINT" ]] || { usage; exit 1; }
+if [[ -n "$MOUNT_POINT" && -n "$DEVICE" ]]; then
+  usage
+  exit 1
+fi
+if [[ -z "$MOUNT_POINT" && -z "$DEVICE" ]]; then
+  usage
+  exit 1
+fi
 [[ -n "$OUT_DIR" ]] || { usage; exit 1; }
 command -v fio >/dev/null 2>&1 || { echo "fio not found" >&2; exit 1; }
 command -v taskset >/dev/null 2>&1 || { echo "taskset not found" >&2; exit 1; }
@@ -61,7 +70,12 @@ CPU_LIST="${CPU_LIST:-$(default_cpu_list)}"
 
 mkdir -p "$OUT_DIR"
 
-cmd=(taskset -c "$CPU_LIST" fio --name="$NAME" --directory="$MOUNT_POINT" --ioengine="$IOENGINE" --rw="$RW" --bs="$BS" --iodepth="$IODEPTH" --numjobs="$NUMJOBS" --runtime="$RUNTIME_SEC" --direct="$DIRECT" --group_reporting="$GROUP_REPORTING" --time_based="$TIME_BASED" --output-format=json --output="${OUT_DIR}/fio.json" --eta=never)
+cmd=(taskset -c "$CPU_LIST" fio --name="$NAME" --ioengine="$IOENGINE" --rw="$RW" --bs="$BS" --iodepth="$IODEPTH" --numjobs="$NUMJOBS" --runtime="$RUNTIME_SEC" --direct="$DIRECT" --group_reporting="$GROUP_REPORTING" --time_based="$TIME_BASED" --output-format=json --output="${OUT_DIR}/fio.json" --eta=never)
+if [[ -n "$DEVICE" ]]; then
+  cmd+=(--filename="$DEVICE")
+else
+  cmd+=(--directory="$MOUNT_POINT")
+fi
 if [[ -n "$SIZE" ]]; then
   cmd+=(--size "$SIZE")
 fi

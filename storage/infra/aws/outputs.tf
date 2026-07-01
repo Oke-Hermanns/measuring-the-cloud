@@ -69,3 +69,7 @@ output "benchmark_local_filesystem" {
 output "benchmark_block_filesystem" {
   value = var.benchmark_block_filesystem
 }
+
+output "benchmark_block_mount_point" {
+  value = var.benchmark_block_mount_point
+}

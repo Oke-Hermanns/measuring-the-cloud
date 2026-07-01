@@ -54,8 +54,16 @@ output "benchmark_local_filesystem" {
   value = var.benchmark_local_filesystem
 }
 
+output "benchmark_local_mount_point" {
+  value = var.benchmark_local_mount_point
+}
+
 output "benchmark_block_filesystem" {
   value = var.benchmark_block_filesystem
+}
+
+output "benchmark_block_mount_point" {
+  value = var.benchmark_block_mount_point
 }
 
 output "benchmark_root_volume_size_gib" {

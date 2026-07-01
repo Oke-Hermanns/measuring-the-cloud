@@ -12,6 +12,6 @@ ssh_ingress_cidr = "0.0.0.0/0"
 ipv4_nameservers = ["1.1.1.1", "8.8.8.8"]
 assign_public_ip = true
 
-# Filesystems used when benchmark disks are formatted by cloud-init.
-benchmark_local_filesystem = "xfs"
-benchmark_block_filesystem = "ext4"
+# Target configuration applied before each scenario run.
+benchmark_local_filesystem = "xfs" # ext4, xfs, or raw
+benchmark_block_filesystem = "xfs" # ext4, xfs, or raw

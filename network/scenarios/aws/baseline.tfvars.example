@@ -1,7 +1,7 @@
 # Copy to baseline.tfvars in this directory and adjust for your AWS account.
 
 aws_region            = "eu-central-1"
-aws_profile           = "default"
+aws_profile           = ""
 
 vpc_cidr           = "10.74.0.0/16"
 client_subnet_cidr = "10.74.1.0/24"

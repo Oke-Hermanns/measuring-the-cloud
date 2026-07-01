@@ -120,8 +120,8 @@ variable "benchmark_local_filesystem" {
   default     = "xfs"
 
   validation {
-    condition     = contains(["ext4", "xfs"], var.benchmark_local_filesystem)
-    error_message = "benchmark_local_filesystem must be one of: ext4, xfs."
+    condition     = contains(["ext4", "xfs", "raw"], var.benchmark_local_filesystem)
+    error_message = "benchmark_local_filesystem must be one of: ext4, xfs, raw."
   }
 }
 
@@ -137,8 +137,8 @@ variable "benchmark_block_filesystem" {
   default     = "ext4"
 
   validation {
-    condition     = contains(["ext4", "xfs"], var.benchmark_block_filesystem)
-    error_message = "benchmark_block_filesystem must be one of: ext4, xfs."
+    condition     = contains(["ext4", "xfs", "raw"], var.benchmark_block_filesystem)
+    error_message = "benchmark_block_filesystem must be one of: ext4, xfs, raw."
   }
 }
 
