@@ -24,6 +24,10 @@ ssh_private_key_path = "~/.ssh/id_ed25519"
 # existing_key_pair_name = "my-existing-aws-keypair"
 # ssh_private_key_path   = "~/.ssh/my-existing-aws-keypair.pem"
 
+# Optional shared-network reuse for dedicated runner mode.
+# existing_vpc_id            = "vpc-0123456789abcdef0"
+# existing_security_group_id = "sg-0123456789abcdef0"
+
 ssh_ingress_cidr = "0.0.0.0/0"
 assign_public_ip = true
 

@@ -43,15 +43,15 @@ output "name_prefix" {
 }
 
 output "vpc_id" {
-  value = aws_vpc.main.id
+  value = trimspace(var.existing_vpc_id) != "" ? var.existing_vpc_id : aws_vpc.main[0].id
 }
 
 output "security_group_id" {
-  value = aws_security_group.bench.id
+  value = trimspace(var.existing_security_group_id) != "" ? var.existing_security_group_id : aws_security_group.bench[0].id
 }
 
 output "security_group_name" {
-  value = aws_security_group.bench.name
+  value = trimspace(var.existing_security_group_id) != "" ? data.aws_security_group.existing[0].name : aws_security_group.bench[0].name
 }
 
 output "instance_affinity" {

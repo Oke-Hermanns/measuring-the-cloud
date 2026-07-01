@@ -1,0 +1,27 @@
+# Copy to basic-infra.tfvars and adjust for your AWS account.
+
+aws_region = "eu-central-1"
+aws_profile = ""
+vpc_cidr = "10.65.0.0/16"
+subnet_cidr = "10.65.1.0/24"
+network_client_subnet_cidr = "10.65.11.0/24"
+network_server_subnet_cidr = "10.65.12.0/24"
+storage_subnet_cidr = "10.65.21.0/24"
+runner_private_ip_host = 10
+runner_availability_zone = "eu-central-1c"
+runner_machine_type = "c6i.large"
+
+# Ubuntu 24.04 AMI in eu-central-1. Replace for other regions.
+image_id = "ami-04baa57774212d79f"
+
+# Option A: create a new AWS key pair from a local public key.
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+ssh_private_key_path = "~/.ssh/id_ed25519"
+
+# Option B: use an existing AWS key pair and matching private key.
+# existing_key_pair_name = "my-existing-aws-keypair"
+# ssh_private_key_path = "~/.ssh/my-existing-aws-keypair.pem"
+
+ssh_ingress_cidr = "0.0.0.0/0"
+root_volume_size_gib = 30
+root_volume_type = "gp3"

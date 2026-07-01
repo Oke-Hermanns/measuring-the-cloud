@@ -15,15 +15,15 @@ output "ssh_private_key_path" {
 }
 
 output "vpc_id" {
-  value = aws_vpc.main.id
+  value = trimspace(var.existing_vpc_id) != "" ? var.existing_vpc_id : aws_vpc.main[0].id
 }
 
 output "security_group_id" {
-  value = aws_security_group.benchmark.id
+  value = trimspace(var.existing_security_group_id) != "" ? var.existing_security_group_id : aws_security_group.benchmark[0].id
 }
 
 output "security_group_name" {
-  value = aws_security_group.benchmark.name
+  value = trimspace(var.existing_security_group_id) != "" ? data.aws_security_group.existing[0].name : aws_security_group.benchmark[0].name
 }
 
 output "aws_region" {

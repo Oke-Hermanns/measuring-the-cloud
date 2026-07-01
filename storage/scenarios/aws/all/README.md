@@ -24,3 +24,12 @@ This folder also includes the representative filesystem-backed scenarios from
 
 The raw-only filesystem scenarios are not duplicated here because the main
 matrix already covers raw runs.
+
+Run the full matrix through the dedicated AWS runner with:
+
+```bash
+./scripts/provision_runner.sh \
+  --runner-provider aws \
+  --workload storage \
+  --scenario-dir storage/scenarios/aws/all
+```

@@ -10,11 +10,12 @@ WORKLOAD=""
 RUN_ID=""
 DESTROY_MODE="always"
 ACCESS_MODE="private"
+AUTH_ENV_FILE=""
 declare -a RUNNER_ARGS=()
 
 usage() {
   cat >&2 <<USAGE
-usage: $0 --workload WORKLOAD --run-id ID [--destroy always|success|never] [--access-mode public|private] -- [runner args...]
+usage: $0 --workload WORKLOAD --run-id ID [--destroy always|success|never] [--access-mode public|private] [--auth-env-file PATH] -- [runner args...]
 USAGE
 }
 
@@ -24,6 +25,7 @@ while [[ $# -gt 0 ]]; do
     --run-id) RUN_ID="$2"; shift 2 ;;
     --destroy) DESTROY_MODE="$2"; shift 2 ;;
     --access-mode) ACCESS_MODE="$2"; shift 2 ;;
+    --auth-env-file) AUTH_ENV_FILE="$2"; shift 2 ;;
     --) shift; RUNNER_ARGS=("$@"); break ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage; exit 1 ;;
@@ -45,13 +47,13 @@ ARTIFACT_DIR="${RUNNER_WORKDIR}/artifacts/${WORKLOAD}/${RUN_ID}"
 STATE_DIR="${RUNNER_WORKDIR}/state"
 PID_FILE="${STATE_DIR}/runner-${RUN_ID}.pid"
 LAUNCHER_LOG="${ARTIFACT_DIR}/launcher.log"
+AUTH_ENV_PATH="${AUTH_ENV_FILE:-${STATE_DIR}/provider-auth.env}"
 
 mkdir -p "$ARTIFACT_DIR" "$STATE_DIR"
 
 runner_cmd=(
   env
   PATH="/usr/local/bin:/usr/bin:/bin"
-  STACKIT_SERVICE_ACCOUNT_KEY_PATH="${STATE_DIR}/stackit-service-account.json"
   "./${WORKLOAD}/runner.sh"
   --access-mode "$ACCESS_MODE"
   --run-id "$RUN_ID"
@@ -61,7 +63,7 @@ runner_cmd=(
 
 (
   cd "$RUNNER_WORKDIR"
-  nohup "${runner_cmd[@]}" >"$LAUNCHER_LOG" 2>&1 < /dev/null &
+  nohup bash -lc 'auth_env="$1"; shift; if [[ -f "$auth_env" ]]; then source "$auth_env"; fi; exec "$@"' bash "$AUTH_ENV_PATH" "${runner_cmd[@]}" >"$LAUNCHER_LOG" 2>&1 < /dev/null &
   printf '%s\n' "$!" >"$PID_FILE"
 )
 

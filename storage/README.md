@@ -6,9 +6,9 @@ runs `fio` benchmark files on the
 discovered targets, fetches the raw artifacts, and then destroys the
 infrastructure according to the selected destroy policy.
 
-The supported cloud paths are STACKIT and AWS. STACKIT can also use the shared
-persistent runner foundation in `infra/stackit-runner/`; when that runner is
-used, the storage VM is controlled over private IPs only.
+The supported cloud paths are STACKIT and AWS. Both providers can use a shared
+persistent runner foundation in `infra/stackit-runner/` or `infra/aws-runner/`;
+when that runner is used, the storage VM is controlled over private IPs only.
 
 ## Quick Start
 
@@ -48,13 +48,25 @@ Run AWS EBS or instance-store scenarios locally:
   --destroy always
 ```
 
-Run it through the shared runner:
+Run it through the shared runner.
+
+Stackit example:
 
 ```bash
 ./scripts/provision_runner.sh \
+  --runner-provider stackit \
   --service-account-json /path/to/stackit-service-account.json \
   --workload storage \
   --scenario-dir storage/scenarios/stackit/all
+```
+
+AWS example:
+
+```bash
+./scripts/provision_runner.sh \
+  --runner-provider aws \
+  --workload storage \
+  --scenario-dir storage/scenarios/aws/all
 ```
 
 Scenario folders under `storage/scenarios/` are organized provider-first, then
@@ -83,7 +95,12 @@ fallback if metadata is incomplete.
 
 On AWS, attached EBS volumes are discovered by EBS volume id through NVMe
 by-id links. Instance-store NVMe disks are discovered by the AWS instance-store
-device model and exposed as the `local` target.
+device model and exposed as the `local` target. In dedicated AWS runner mode,
+the runner injects the shared VPC and security-group IDs into the generated
+baseline tfvars so the benchmark VM stays private to the runner network.
+To run more experiments on the same persistent runner, call
+`provision_runner.sh` again with the next storage or network scenario instead
+of destroying the runner foundation between runs.
 
 ## Scenario Contract
 

@@ -23,11 +23,14 @@ resource "random_id" "suffix" {
 }
 
 locals {
-  name_prefix           = "${var.project_name}-${random_id.suffix.hex}"
-  use_existing_key_pair = trimspace(var.existing_key_pair_name) != ""
-  use_public_ip         = var.assign_public_ip
-  use_placement_group   = var.instance_affinity != "none"
-  placement_strategy    = var.instance_affinity == "co-located" ? "cluster" : var.instance_affinity == "different-host" ? "spread" : null
+  name_prefix                 = "${var.project_name}-${random_id.suffix.hex}"
+  use_existing_key_pair       = trimspace(var.existing_key_pair_name) != ""
+  use_existing_vpc            = trimspace(var.existing_vpc_id) != ""
+  use_existing_security_group = trimspace(var.existing_security_group_id) != ""
+  use_existing_nat_gateway    = trimspace(var.existing_nat_gateway_id) != ""
+  use_public_ip               = var.assign_public_ip
+  use_placement_group         = var.instance_affinity != "none"
+  placement_strategy          = var.instance_affinity == "co-located" ? "cluster" : var.instance_affinity == "different-host" ? "spread" : null
 
   availability_zones = distinct([
     var.client_availability_zone,
@@ -47,10 +50,43 @@ locals {
   }
 }
 
+data "aws_vpc" "existing" {
+  count = local.use_existing_vpc ? 1 : 0
+  id    = var.existing_vpc_id
+}
+
+data "aws_internet_gateway" "existing" {
+  count = local.use_existing_vpc ? 1 : 0
+
+  filter {
+    name   = "attachment.vpc-id"
+    values = [var.existing_vpc_id]
+  }
+}
+
+data "aws_security_group" "existing" {
+  count = local.use_existing_security_group ? 1 : 0
+  id    = var.existing_security_group_id
+}
+
 check "ssh_key_inputs" {
   assert {
     condition     = local.use_existing_key_pair || trimspace(var.ssh_public_key_path) != ""
     error_message = "Set existing_key_pair_name, or provide ssh_public_key_path to create a new AWS key pair."
+  }
+}
+
+check "existing_network_inputs" {
+  assert {
+    condition     = local.use_existing_vpc == local.use_existing_security_group
+    error_message = "existing_vpc_id and existing_security_group_id must be set together when reusing shared AWS networking."
+  }
+}
+
+check "private_egress_inputs" {
+  assert {
+    condition     = local.use_public_ip || !local.use_existing_vpc || local.use_existing_nat_gateway
+    error_message = "Set existing_nat_gateway_id when reusing an existing VPC for private benchmark instances with assign_public_ip = false."
   }
 }
 
@@ -80,6 +116,7 @@ resource "aws_placement_group" "bench" {
 }
 
 resource "aws_vpc" "main" {
+  count                = local.use_existing_vpc ? 0 : 1
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
@@ -90,7 +127,8 @@ resource "aws_vpc" "main" {
 }
 
 resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id
+  count  = local.use_existing_vpc ? 0 : 1
+  vpc_id = aws_vpc.main[0].id
 
   tags = merge(local.labels, {
     Name = "${local.name_prefix}-igw"
@@ -100,7 +138,7 @@ resource "aws_internet_gateway" "main" {
 resource "aws_subnet" "bench" {
   for_each = local.subnet_cidrs_by_az
 
-  vpc_id                  = aws_vpc.main.id
+  vpc_id                  = local.use_existing_vpc ? data.aws_vpc.existing[0].id : aws_vpc.main[0].id
   cidr_block              = each.value
   availability_zone       = each.key
   map_public_ip_on_launch = local.use_public_ip
@@ -111,11 +149,12 @@ resource "aws_subnet" "bench" {
 }
 
 resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
+  vpc_id = local.use_existing_vpc ? data.aws_vpc.existing[0].id : aws_vpc.main[0].id
 
   route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
+    cidr_block     = "0.0.0.0/0"
+    gateway_id     = local.use_public_ip ? (local.use_existing_vpc ? data.aws_internet_gateway.existing[0].id : aws_internet_gateway.main[0].id) : null
+    nat_gateway_id = local.use_public_ip ? null : var.existing_nat_gateway_id
   }
 
   tags = merge(local.labels, {
@@ -131,9 +170,10 @@ resource "aws_route_table_association" "public" {
 }
 
 resource "aws_security_group" "bench" {
+  count       = local.use_existing_security_group ? 0 : 1
   name        = "${local.name_prefix}-sg"
   description = "Network benchmark security group"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = local.use_existing_vpc ? data.aws_vpc.existing[0].id : aws_vpc.main[0].id
 
   ingress {
     from_port   = 22
@@ -177,7 +217,7 @@ resource "aws_instance" "client" {
   availability_zone           = var.client_availability_zone
   subnet_id                   = aws_subnet.bench[var.client_availability_zone].id
   private_ip                  = local.client_private_ip
-  vpc_security_group_ids      = [aws_security_group.bench.id]
+  vpc_security_group_ids      = [local.use_existing_security_group ? var.existing_security_group_id : aws_security_group.bench[0].id]
   key_name                    = local.use_existing_key_pair ? var.existing_key_pair_name : aws_key_pair.bench[0].key_name
   associate_public_ip_address = local.use_public_ip
   placement_group             = local.use_placement_group ? aws_placement_group.bench[0].name : null
@@ -204,7 +244,7 @@ resource "aws_instance" "server" {
   availability_zone           = var.server_availability_zone
   subnet_id                   = aws_subnet.bench[var.server_availability_zone].id
   private_ip                  = local.server_private_ip
-  vpc_security_group_ids      = [aws_security_group.bench.id]
+  vpc_security_group_ids      = [local.use_existing_security_group ? var.existing_security_group_id : aws_security_group.bench[0].id]
   key_name                    = local.use_existing_key_pair ? var.existing_key_pair_name : aws_key_pair.bench[0].key_name
   associate_public_ip_address = local.use_public_ip
   placement_group             = local.use_placement_group ? aws_placement_group.bench[0].name : null

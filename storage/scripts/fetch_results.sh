@@ -66,9 +66,26 @@ fi
 
 SSH_REMOTE_CMD="$(ssh_base_cmd "$SSH_KEY" "$KNOWN_HOSTS_FILE")"
 
+ssh_run() {
+  local cmd="$1"
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR -o UserKnownHostsFile="$KNOWN_HOSTS_FILE" "${SSH_USER}@${BENCHMARK_HOST}" "$cmd"
+}
+
 log "fetching results from benchmark host ${BENCHMARK_HOST}"
-rsync -az -e "${SSH_REMOTE_CMD}" \
-  "${SSH_USER}@${BENCHMARK_HOST}:${REMOTE_SCENARIO_DIR}/" \
-  "${LOCAL_SCENARIO_DIR}/"
+if ssh_run "test -d $(printf '%q' "$REMOTE_SCENARIO_DIR")"; then
+  rsync -az -e "${SSH_REMOTE_CMD}" \
+    "${SSH_USER}@${BENCHMARK_HOST}:${REMOTE_SCENARIO_DIR}/" \
+    "${LOCAL_SCENARIO_DIR}/"
+else
+  log "remote scenario directory missing; fetching bootstrap logs instead"
+  mkdir -p "${LOCAL_SCENARIO_DIR}/bootstrap-failure"
+  rsync -az -e "${SSH_REMOTE_CMD}" \
+    --ignore-missing-args \
+    "${SSH_USER}@${BENCHMARK_HOST}:/var/log/cloud-init.log" \
+    "${SSH_USER}@${BENCHMARK_HOST}:/var/log/cloud-init-output.log" \
+    "${SSH_USER}@${BENCHMARK_HOST}:/var/log/cloud-measuring-user-data.log" \
+    "${SSH_USER}@${BENCHMARK_HOST}:/tmp/cloud-init-status.log" \
+    "${LOCAL_SCENARIO_DIR}/bootstrap-failure/" || true
+fi
 
 log "results downloaded to ${LOCAL_SCENARIO_DIR}"

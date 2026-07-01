@@ -4,10 +4,10 @@ The network runner provisions a client/server pair for each infrastructure
 scenario, runs benchmark files on that pair, fetches results, and then destroys
 the infrastructure according to the selected destroy policy.
 
-For unattended execution, there is a separate persistent STACKIT foundation
-stack in `infra/stackit-runner/` which provisions a small runner VM,
-shared network, and shared security group. The benchmark runner can be staged
-onto that VM and then executed over private IPs only.
+For unattended execution, there is a separate persistent runner foundation
+stack per provider in `infra/stackit-runner/` and `infra/aws-runner/`. Each
+provisions a small runner VM plus shared networking so the benchmark runner
+can be staged onto that VM and then executed over private IPs only.
 
 ## Runner
 
@@ -37,18 +37,31 @@ Useful options:
 
 ## Dedicated Runner
 
-Copy and edit the shared runner foundation tfvars file:
+Copy and edit the shared runner foundation tfvars file for the provider you
+want to use:
 
 ```bash
 cp infra/stackit-runner/basic-infra.tfvars.example infra/stackit-runner/basic-infra.tfvars
+cp infra/aws-runner/basic-infra.tfvars.example infra/aws-runner/basic-infra.tfvars
 ```
 
-Then provision the runner and launch the benchmark suite on it:
+Then provision the runner and launch the benchmark suite on it.
+
+Stackit example:
 
 ```bash
 ./scripts/provision_runner.sh \
+  --runner-provider stackit \
   --service-account-json /path/to/stackit-service-account.json \
   --scenario-dir network/scenarios/stackit/all
+```
+
+AWS example:
+
+```bash
+./scripts/provision_runner.sh \
+  --runner-provider aws \
+  --scenario-dir network/scenarios/aws/all
 ```
 
 The helper stages only the required repository assets to the runner via
@@ -58,8 +71,9 @@ the runner-side launcher script.
 
 In private runner mode, the generated benchmark tfvars set
 `assign_public_ip = false`, so the benchmark client and server are reachable
-only over private IPs. Their private IPs are auto-assigned by STACKIT and then
-read back from `tofu output`.
+only over private IPs. The helper also injects the shared runner network IDs
+for the selected provider so the scenario VMs land in the same private network
+domain as the runner.
 
 After the run, fetch the full result tree back to the workstation:
 
@@ -73,7 +87,8 @@ After the run, fetch the full result tree back to the workstation:
 To tear down the persistent foundation stack:
 
 ```bash
-./scripts/destroy_runner.sh
+./scripts/destroy_runner.sh --runner-provider stackit
+./scripts/destroy_runner.sh --runner-provider aws
 ```
 
 ## Scenario Files
@@ -105,7 +120,9 @@ cp network/scenarios/aws/baseline.tfvars.example \
 
 AWS credentials are resolved by the AWS provider. Set `aws_profile` in the
 tfvars file, leave it empty to use environment credentials, or use the standard
-AWS credential chain.
+AWS credential chain. When the dedicated AWS runner path is used, the generated
+runner-local baseline tfvars force `aws_profile = ""` so OpenTofu on the runner
+uses the EC2 instance role.
 
 Supported OS tuning profiles:
 
@@ -184,7 +201,10 @@ one CPU. This is intentionally not part of the benchmark-file contract.
 
 When the runner is launched through `provision_runner.sh`, it uses private IPs
 for all benchmark control traffic. The foundation stack only needs to be
-provisioned once and can be reused across scenario runs.
+provisioned once and can be reused across scenario runs for the same provider.
+Use `provision_runner.sh` again for additional experiments on the same runner;
+it is the supported way to restage files and refresh runner-local tfvars before
+launching another job.
 
 ## Result Layout
 

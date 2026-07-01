@@ -3,7 +3,7 @@
 Benchmark framework for comparing cloud network and storage performance.
 
 The current implemented slices are STACKIT and AWS network and storage
-benchmarks. STACKIT also has a persistent benchmark runner VM path for
+benchmarks. Both providers support a persistent benchmark runner VM path for
 private-IP execution:
 
 - provision a small runner VM plus shared network/security plumbing with
@@ -21,24 +21,35 @@ discovered local and/or attached block storage targets.
 
 ## Quick Start
 
-Copy and edit the shared STACKIT runner foundation tfvars:
+Copy and edit the runner foundation tfvars for the provider you want to run:
 
 ```bash
 cp infra/stackit-runner/basic-infra.tfvars.example infra/stackit-runner/basic-infra.tfvars
+cp infra/aws-runner/basic-infra.tfvars.example infra/aws-runner/basic-infra.tfvars
 ```
 
-Then provision the runner and start a benchmark run for one scenario file:
+Then provision a Stackit runner and start a benchmark run for one scenario file:
 
 ```bash
 ./scripts/provision_runner.sh \
+  --runner-provider stackit \
   --service-account-json /path/to/stackit-service-account.json \
   --scenario network/scenarios/stackit/baseline.sh
 ```
 
-Or run a scenario folder:
+Or provision an AWS runner and launch an AWS storage/network matrix:
 
 ```bash
 ./scripts/provision_runner.sh \
+  --runner-provider aws \
+  --scenario-dir network/scenarios/aws/all
+```
+
+For Stackit scenario folders:
+
+```bash
+./scripts/provision_runner.sh \
+  --runner-provider stackit \
   --service-account-json /path/to/stackit-service-account.json \
   --scenario-dir network/scenarios/stackit/all
 ```
@@ -55,6 +66,21 @@ results back to your workstation once the run has finished:
 
 If you omit `--run-id`, the helper fetches the latest completed run for the
 selected workload. `--workload storage` works the same way.
+
+`provision_runner.sh` rejects mixed-provider scenario selections. AWS runner
+VMs use the EC2 instance role on the runner host; Stackit runner VMs use the
+staged service-account key.
+To reuse an existing runner for more experiments, invoke
+`provision_runner.sh` again with the new scenario or workload and keep the
+runner foundation alive until you are done.
+
+When you are finished with all network and storage experiments on that
+persistent runner, destroy the runner foundation with:
+
+```bash
+./scripts/destroy_runner.sh --runner-provider stackit
+./scripts/destroy_runner.sh --runner-provider aws
+```
 
 The direct local runner is available for ad-hoc execution:
 

@@ -22,6 +22,12 @@ variable "vpc_cidr" {
   default     = "10.74.0.0/16"
 }
 
+variable "existing_vpc_id" {
+  description = "Existing VPC ID to reuse for private runner mode. Leave empty to create a dedicated VPC."
+  type        = string
+  default     = ""
+}
+
 variable "client_subnet_cidr" {
   description = "Subnet CIDR for the client availability zone"
   type        = string
@@ -38,6 +44,18 @@ variable "ssh_ingress_cidr" {
   description = "CIDR allowed to SSH into benchmark instances"
   type        = string
   default     = "0.0.0.0/0"
+}
+
+variable "existing_security_group_id" {
+  description = "Existing security group ID to reuse for private runner mode. Leave empty to create a dedicated security group."
+  type        = string
+  default     = ""
+}
+
+variable "existing_nat_gateway_id" {
+  description = "Existing NAT gateway ID to reuse for private runner mode when benchmark instances have no public IP."
+  type        = string
+  default     = ""
 }
 
 variable "ssh_public_key_path" {
