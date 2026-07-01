@@ -261,6 +261,17 @@ wait_for_runner_cloud_init
 
 log "syncing repository assets to the runner"
 rsync -az --delete -e "$SSH_REMOTE_CMD" \
+  --exclude "/${WORKLOAD}/**/.terraform/***" \
+  --exclude "/${WORKLOAD}/**/.terraform/" \
+  --exclude "/${WORKLOAD}/**/terraform.tfstate*" \
+  --exclude "/${WORKLOAD}/**/artifacts/***" \
+  --exclude "/${WORKLOAD}/**/artifacts/" \
+  --exclude "/${WORKLOAD}/**/logs/***" \
+  --exclude "/${WORKLOAD}/**/logs/" \
+  --exclude "/${WORKLOAD}/**/state/***" \
+  --exclude "/${WORKLOAD}/**/state/" \
+  --exclude "/${WORKLOAD}/**/*.tfvars" \
+  --exclude "/${WORKLOAD}/**/*.tfvars.json" \
   --include '/README.md' \
   --include '/common/' \
   --include '/common/***' \
@@ -268,13 +279,6 @@ rsync -az --delete -e "$SSH_REMOTE_CMD" \
   --include "/${WORKLOAD}/***" \
   --include '/scripts/' \
   --include '/scripts/***' \
-  --exclude "/${WORKLOAD}/**/.terraform/" \
-  --exclude "/${WORKLOAD}/**/terraform.tfstate*" \
-  --exclude "/${WORKLOAD}/**/artifacts/" \
-  --exclude "/${WORKLOAD}/**/logs/" \
-  --exclude "/${WORKLOAD}/**/state/" \
-  --exclude "/${WORKLOAD}/**/*.tfvars" \
-  --exclude "/${WORKLOAD}/**/*.tfvars.json" \
   --exclude '*' \
   "${REPO_ROOT}/" \
   "${RUNNER_SSH_USER}@${RUNNER_PUBLIC_IP}:${RUNNER_WORKDIR}/"
