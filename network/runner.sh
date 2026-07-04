@@ -67,7 +67,7 @@ run_scenario() {
   scenario_file="$(abs_path "$scenario_file")"
   require_file "$scenario_file"
 
-  unset SCENARIO_NAME PROVIDER TOFU_DIR TFVARS_FILE BENCHMARK_DIR PLACEMENT_MODE OS_TUNING INSTANCE_AFFINITY CLIENT_MACHINE_TYPE SERVER_MACHINE_TYPE CLIENT_AVAILABILITY_ZONE SERVER_AVAILABILITY_ZONE SKIP SKIP_REASON
+  unset SCENARIO_NAME PROVIDER TOFU_DIR TFVARS_FILE BENCHMARK_DIR PLACEMENT_MODE OS_TUNING INSTANCE_AFFINITY CLIENT_MACHINE_TYPE SERVER_MACHINE_TYPE CLIENT_AVAILABILITY_ZONE SERVER_AVAILABILITY_ZONE SERVER_REGION SKIP SKIP_REASON
   # shellcheck disable=SC1090
   source "$scenario_file"
 
@@ -174,6 +174,9 @@ run_scenario() {
     apply_tfvar_overlay "$merged_tfvars" "client_availability_zone" "\"${CLIENT_AVAILABILITY_ZONE}\""
     apply_tfvar_overlay "$merged_tfvars" "server_availability_zone" "\"${SERVER_AVAILABILITY_ZONE}\""
   fi
+  if [[ -n "${SERVER_REGION:-}" ]]; then
+    apply_tfvar_overlay "$merged_tfvars" "server_region" "\"${SERVER_REGION}\""
+  fi
   trap 'rm -f "${merged_tfvars:-}"' RETURN
 
   "${SCRIPT_DIR}/scripts/setup_infra.sh" --tofu-dir "$TOFU_DIR" --tfvars-file "$merged_tfvars" || setup_rc=$?
@@ -188,6 +191,8 @@ run_scenario() {
       --access-mode "$ACCESS_MODE" \
       --local-log-dir "$LOCAL_RUN_DIR" \
       --run-id "$RUN_ID" \
+      ${SERVER_REGION:+--server-region "$SERVER_REGION"} \
+      ${PLACEMENT_MODE:+--placement-mode "$PLACEMENT_MODE"} \
       "${benchmark_args[@]}" || bench_rc=$?
 
     "${SCRIPT_DIR}/scripts/fetch_results.sh" \
